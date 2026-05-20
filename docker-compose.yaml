@@ -1,0 +1,97 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: telegram_ci
+      POSTGRES_USER: ci_user
+      POSTGRES_PASSWORD: ci_pass
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ci_user -d telegram_ci"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  migrate:
+    build: .
+    command: ["python", "-m", "alembic", "upgrade", "head"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://ci_user:ci_pass@postgres:5432/telegram_ci
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  ingestion:
+    build: .
+    command: ["python", "-m", "ingestion.main"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://ci_user:ci_pass@postgres:5432/telegram_ci
+      REDIS_URL: redis://redis:6379/0
+      TG_API_ID: ${TG_API_ID}
+      TG_API_HASH: ${TG_API_HASH}
+      TG_SESSION_NAME: ${TG_SESSION_NAME:-session}
+      TG_PHONE: ${TG_PHONE}
+      MONITORED_CHAT_IDS: ${MONITORED_CHAT_IDS}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - ./sessions:/app/sessions
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    build: .
+    command: ["python", "-m", "pipeline.queue_consumer"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://ci_user:ci_pass@postgres:5432/telegram_ci
+      REDIS_URL: redis://redis:6379/0
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      replicas: 2
+
+  api:
+    build: .
+    command: ["python", "-m", "uvicorn", "api.app:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://ci_user:ci_pass@postgres:5432/telegram_ci
+      REDIS_URL: redis://redis:6379/0
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "scripts/healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  pgdata:
+  redisdata:
