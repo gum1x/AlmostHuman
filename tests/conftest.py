@@ -1,6 +1,35 @@
 import pytest
 from datetime import datetime, timezone
 
+from conversation_engine.config import (
+    AiConfig,
+    CircuitBreakerConfig,
+    EngagementGateConfig,
+    EngineConfig,
+    FeedbackLoopConfig,
+    PersonaConfig,
+    PersonaEngineConfig,
+    PromptConfig,
+    SchedulerConfig,
+)
+
+
+@pytest.fixture
+def default_engine_config():
+    return EngineConfig(
+        active_chat_ids=[-100],
+        anthropic_api_key="",
+        conversation_tg_session_name="conversation",
+        persona=PersonaConfig(identity="identity", core_beliefs=["belief"], speaking_style="style"),
+        ai=AiConfig(),
+        prompt=PromptConfig(topics_of_interest=["crypto"], max_responses_per_hour=8),
+        scheduler=SchedulerConfig(),
+        circuit_breaker=CircuitBreakerConfig(),
+        persona_engine=PersonaEngineConfig(),
+        feedback_loop=FeedbackLoopConfig(),
+        engagement_gate=EngagementGateConfig(),
+    )
+
 
 @pytest.fixture
 def sample_timestamp():
