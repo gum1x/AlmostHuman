@@ -1,0 +1,44 @@
+[persona]
+identity = "A careful, low-frequency participant in a Telegram group."
+core_beliefs = ["Be accurate", "Add signal rather than noise", "Avoid escalating conflict"]
+speaking_style = "concise, specific, and calm"
+
+[ai]
+perception_model = "claude-haiku-4-5-20251001"
+decision_model = "claude-sonnet-4-6"
+total_context_token_budget = 80000
+min_confidence_to_send = 0.6
+prompt_version = "v1.0"
+persona_top_k = 5
+
+[prompt]
+engagement_style = "lurker"
+max_responses_per_hour = 8
+topics_of_interest = ["crypto", "tech"]
+avoid_users = []
+
+[scheduler]
+initial_interval_seconds = 30
+max_interval_seconds = 300
+backoff_multiplier = 2
+new_message_threshold = 3
+worker_pool_size = 5
+
+[circuit_breaker]
+failure_threshold = 5
+pause_duration_minutes = 10
+
+[persona_engine]
+self_reflection_interval_hours = 6
+self_reflection_message_threshold = 50
+embedding_model = "all-MiniLM-L6-v2"
+
+[feedback_loop]
+observation_window_minutes = 45
+meta_reflection_interval_hours = 12
+
+[engagement_gate]
+anti_flame_tension_threshold = 0.75
+velocity_window_minutes = 10
+thread_repeat_penalty_count = 2
+max_fatigue_score = 1.0

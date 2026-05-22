@@ -19,6 +19,10 @@ dependencies = [
     "pydantic-settings>=2.3",
     "structlog>=24.1",
     "orjson>=3.10",
+    "anthropic>=0.40",
+    "pgvector>=0.3",
+    "sentence-transformers>=3.0",
+    "vaderSentiment>=3.3",
 ]
 
 [project.optional-dependencies]
@@ -35,4 +39,4 @@ testpaths = ["tests"]
 filterwarnings = ["ignore::DeprecationWarning"]
 
 [tool.setuptools.packages.find]
-include = ["core*", "storage*", "pipeline*", "ingestion*", "api*"]
+include = ["core*", "storage*", "pipeline*", "ingestion*", "api*", "conversation_engine*"]

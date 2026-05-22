@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:pg16
     environment:
       POSTGRES_DB: telegram_ci
       POSTGRES_USER: ci_user
@@ -91,6 +91,30 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+
+  conversation-engine:
+    build: .
+    command: ["python", "-m", "conversation_engine"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://ci_user:ci_pass@postgres:5432/telegram_ci
+      REDIS_URL: redis://redis:6379/0
+      TG_API_ID: ${TG_API_ID}
+      TG_API_HASH: ${TG_API_HASH}
+      TG_PHONE: ${TG_PHONE}
+      CONVERSATION_TG_SESSION_NAME: ${CONVERSATION_TG_SESSION_NAME:-conversation}
+      ACTIVE_CHAT_IDS: ${ACTIVE_CHAT_IDS}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      WORKER_POOL_SIZE: ${WORKER_POOL_SIZE:-5}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - ./sessions:/app/sessions
+      - ./config.toml:/app/config.toml:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
 
 volumes:
   pgdata:
