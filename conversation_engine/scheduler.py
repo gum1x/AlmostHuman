@@ -30,6 +30,7 @@ from conversation_engine.persona_engine import (
     write_interaction_memory,
     write_stance_memory,
 )
+from conversation_engine.prompts import build_perception_prompt, build_response_decision_prompt
 from conversation_engine.sender import TelegramSender
 from conversation_engine.validators import validate
 from core.logging import get_logger, setup_logging
@@ -163,14 +164,8 @@ class ConversationScheduler:
                         current_persona,
                     )
                     raw_context = context.context
-                    perception_prompt = (
-                        f"{context.context}\n\n"
-                        "Decide whether there is a worthwhile opening to respond. "
-                        "Use semantic judgment from the visible conversation, not just numeric scores. "
-                        "Return JSON with should_respond, confidence, reasoning, entry_points, "
-                        "target_message_id, topic, risks, annoying_reason."
-                    )
-                    request1 = await self.ai_client.call_perception_model(perception_prompt)
+                    perception_prompt, perception_system = build_perception_prompt(context, self.config)
+                    request1 = await self.ai_client.call_perception_model(perception_prompt, perception_system)
                     perception = parse_perception(request1.text)
                     if not perception.should_respond:
                         await memory.insert_ai_decision(
@@ -202,15 +197,13 @@ class ConversationScheduler:
                             or ([perception.target_message_id] if perception.target_message_id else []),
                         ),
                     )
-                    decision_prompt = (
-                        f"{context.context}\n\n{constraints}\n\n"
-                        "Draft the response decision. Return JSON matching: "
-                        "should_respond, confidence, response_text, reply_to_message_id, reply_to_user_id, "
-                        "target_message_id, reasoning, semantic_risk, annoying_reason, tone_calibration, "
-                        "stances, feedback_informed. "
-                        "If the target message does not actually need a reply, set should_respond=false."
+                    decision_prompt, decision_system = build_response_decision_prompt(
+                        context,
+                        constraints,
+                        perception,
+                        self.config,
                     )
-                    request2 = await self.ai_client.call_decision_model(decision_prompt)
+                    request2 = await self.ai_client.call_decision_model(decision_prompt, decision_system)
                     decision = parse_response_decision(request2.text)
                     ok, reason = validate(decision, self.config)
                     stored_decision = await memory.insert_ai_decision(

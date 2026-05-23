@@ -122,7 +122,7 @@ class AnthropicAiClient:
 
 class FakeAiClient:
     async def call_perception_model(self, prompt: str, system: str | None = None) -> AiCallResult:
-        if "reflecting on your recent behavior" in prompt:
+        if "DECISION TASK: SELF REFLECTION" in prompt:
             return AiCallResult(
                 text=json.dumps(
                     {
@@ -136,7 +136,7 @@ class FakeAiClient:
                 latency_ms=0,
                 tokens_used=0,
             )
-        if "aggregated feedback" in prompt:
+        if "DECISION TASK: META REFLECTION" in prompt:
             return AiCallResult(
                 text=json.dumps(
                     {
@@ -147,6 +147,12 @@ class FakeAiClient:
                         "updated_stance_recommendations": [],
                     }
                 ),
+                latency_ms=0,
+                tokens_used=0,
+            )
+        if "DECISION TASK: OUTCOME SCORING" in prompt:
+            return AiCallResult(
+                text=json.dumps({"outcome": "neutral", "score": 0.0}),
                 latency_ms=0,
                 tokens_used=0,
             )
