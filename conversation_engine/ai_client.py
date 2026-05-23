@@ -20,7 +20,10 @@ class PerceptionDecision(BaseModel):
     confidence: float = 0.0
     reasoning: str = ""
     entry_points: list[int] = Field(default_factory=list)
+    target_message_id: int | None = None
     topic: str | None = None
+    risks: str = ""
+    annoying_reason: str = ""
 
 
 class ResponseDecision(BaseModel):
@@ -29,10 +32,12 @@ class ResponseDecision(BaseModel):
     response_text: str | None = None
     reply_to_message_id: int | None = None
     reply_to_user_id: int | None = None
+    target_message_id: int | None = None
     reasoning: str = ""
+    semantic_risk: str = ""
+    annoying_reason: str = ""
     tone_calibration: str | None = None
     stances: dict[str, Any] = Field(default_factory=dict)
-    persona_alignment_score: float = 1.0
     feedback_informed: bool = False
 
 
@@ -44,7 +49,7 @@ class RelationshipUpdate(BaseModel):
 class ReflectionOutput(BaseModel):
     reflection_text: str
     updated_summary: str
-    drift_score: float
+    drift_score: float = 0.0
     drift_explanation: str = ""
     relationship_updates: list[RelationshipUpdate] = Field(default_factory=list)
     tone_adjustments: str = ""
@@ -123,7 +128,6 @@ class FakeAiClient:
                     {
                         "reflection_text": "No production model is configured, so this is a placeholder reflection.",
                         "updated_summary": "The bot should remain concise, careful, and low-frequency.",
-                        "drift_score": 0.0,
                         "drift_explanation": "No drift measured by fake client.",
                         "relationship_updates": [],
                         "tone_adjustments": "No changes.",
@@ -159,8 +163,10 @@ class FakeAiClient:
                     "should_respond": False,
                     "confidence": 0.0,
                     "response_text": None,
+                    "target_message_id": None,
                     "reasoning": "fake client",
-                    "persona_alignment_score": 1.0,
+                    "semantic_risk": "",
+                    "annoying_reason": "",
                     "feedback_informed": False,
                 }
             ),
