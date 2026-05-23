@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
+
 
 def _split_ints(value: str | None) -> list[int]:
     if not value:
@@ -100,6 +102,7 @@ def _section(data: dict[str, Any], name: str) -> dict[str, Any]:
 
 
 def load_engine_config(path: str | Path = "config.toml") -> EngineConfig:
+    load_dotenv()
     raw: dict[str, Any] = {}
     file_path = Path(path)
     if file_path.exists():
