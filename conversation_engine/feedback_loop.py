@@ -12,6 +12,7 @@ from conversation_engine.config import EngineConfig
 from conversation_engine.enrichment import sentiment_score
 from conversation_engine.memory_manager import ConversationMemoryManager, utcnow
 from conversation_engine.observability import record_feedback
+from conversation_engine.prompts import build_meta_reflection_prompt, build_outcome_scoring_prompt
 from storage.database import async_session_factory
 
 
@@ -34,14 +35,12 @@ def count_negative_emojis(reactions: list[Reaction]) -> int:
 
 
 async def ai_score_outcome(ai_client, replies: list[Any], reactions: list[Reaction], sentiment: float) -> tuple[str, float]:
-    prompt = f"""
-Classify the response outcome from Telegram follow-up data.
-Replies: {[getattr(reply, 'text_cleaned', None) or getattr(reply, 'text_raw', '') for reply in replies[:10]]}
-Reactions: {[reaction.__dict__ for reaction in reactions]}
-Follow-up sentiment: {sentiment}
-Return JSON: {{"outcome": "positive|neutral|negative|ignored|backlash", "score": -1.0}}
-""".strip()
-    result = await ai_client.call_perception_model(prompt)
+    prompt, system = build_outcome_scoring_prompt(
+        replies=[getattr(reply, "text_cleaned", None) or getattr(reply, "text_raw", "") for reply in replies[:10]],
+        reactions=[reaction.__dict__ for reaction in reactions],
+        sentiment=sentiment,
+    )
+    result = await ai_client.call_perception_model(prompt, system)
     data = json.loads(result.text[result.text.find("{") : result.text.rfind("}") + 1])
     return str(data["outcome"]), float(data["score"])
 
@@ -146,14 +145,8 @@ async def run_meta_reflection(chat_id: int, memory: ConversationMemoryManager, a
     if len(unprocessed) < 10:
         return
     aggregated = aggregate_feedback(unprocessed)
-    prompt = f"""
-Based on aggregated feedback from {len(unprocessed)} recent responses:
-{json.dumps(aggregated)}
-
-Produce JSON with what_works, what_doesnt, tone_preferences_by_user,
-topic_performance, and updated_stance_recommendations.
-""".strip()
-    result = await ai_client.call_perception_model(prompt)
+    prompt, system = build_meta_reflection_prompt(len(unprocessed), aggregated)
+    result = await ai_client.call_perception_model(prompt, system)
     parsed = parse_meta_reflection(result.text)
     for rec in parsed.updated_stance_recommendations:
         await memory.upsert_stance(chat_id, topic=rec.topic, stance=rec.recommended_approach)

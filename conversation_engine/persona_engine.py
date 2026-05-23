@@ -11,6 +11,7 @@ from conversation_engine.observability import (
     record_reflection_triggered,
     record_vector_memory_retrieved,
 )
+from conversation_engine.prompts import build_self_reflection_prompt
 
 try:
     from sentence_transformers import SentenceTransformer
@@ -157,29 +158,14 @@ async def run_self_reflection(
     if messages_since_last is None:
         messages_since_last = await memory.count_bot_memory_since_last_reflection(chat_id)
 
-    prompt = f"""
-You are reflecting on your recent behavior in a Telegram group chat.
-
-YOUR CORE IDENTITY:
-{current_persona.identity_summary}
-
-YOUR CORE BELIEFS:
-{current_persona.core_beliefs}
-
-YOUR SPEAKING STYLE:
-{current_persona.speaking_style}
-
-YOUR RECENT MESSAGES (last 50):
-{format_recent_messages(recent_messages)}
-
-FEEDBACK ON THOSE MESSAGES:
-{format_feedback(recent_feedback)}
-
-Reflect on consistency, engagement patterns, what is working, user responses, and tone drift.
-Produce only JSON with keys reflection_text, updated_summary, drift_explanation,
-relationship_updates, and tone_adjustments. Do not invent numeric scores.
-""".strip()
-    result = await ai_client.call_perception_model(prompt)
+    prompt, system = build_self_reflection_prompt(
+        identity_summary=current_persona.identity_summary,
+        core_beliefs=current_persona.core_beliefs,
+        speaking_style=current_persona.speaking_style,
+        recent_messages=format_recent_messages(recent_messages),
+        feedback=format_feedback(recent_feedback),
+    )
+    result = await ai_client.call_perception_model(prompt, system)
     parsed = parse_reflection(result.text)
     reflection_embedding = embed_text(parsed.reflection_text)
 
