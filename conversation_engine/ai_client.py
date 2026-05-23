@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -92,7 +93,8 @@ class AnthropicAiClient:
         if not config.anthropic_api_key:
             raise RuntimeError("ANTHROPIC_API_KEY is required")
         self.config = config
-        self._client = AsyncAnthropic(api_key=config.anthropic_api_key)
+        base_url = os.getenv("ANTHROPIC_BASE_URL") or None
+        self._client = AsyncAnthropic(api_key=config.anthropic_api_key, base_url=base_url)
 
     async def call_perception_model(self, prompt: str, system: str | None = None) -> AiCallResult:
         return await self._call(self.config.ai.perception_model, prompt, system)
@@ -122,7 +124,7 @@ class AnthropicAiClient:
 
 class FakeAiClient:
     async def call_perception_model(self, prompt: str, system: str | None = None) -> AiCallResult:
-        if "DECISION TASK: SELF REFLECTION" in prompt:
+        if "Task: self_reflection" in prompt:
             return AiCallResult(
                 text=json.dumps(
                     {
@@ -136,7 +138,7 @@ class FakeAiClient:
                 latency_ms=0,
                 tokens_used=0,
             )
-        if "DECISION TASK: META REFLECTION" in prompt:
+        if "Task: meta_reflection" in prompt:
             return AiCallResult(
                 text=json.dumps(
                     {
@@ -150,7 +152,7 @@ class FakeAiClient:
                 latency_ms=0,
                 tokens_used=0,
             )
-        if "DECISION TASK: OUTCOME SCORING" in prompt:
+        if "Task: outcome_scoring" in prompt:
             return AiCallResult(
                 text=json.dumps({"outcome": "neutral", "score": 0.0}),
                 latency_ms=0,

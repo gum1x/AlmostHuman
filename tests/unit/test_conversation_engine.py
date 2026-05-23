@@ -11,6 +11,7 @@ from conversation_engine.engagement_gate import GateResult, compute_gate_score, 
 from conversation_engine.enrichment import Brief, EnrichedMessage
 from conversation_engine.feedback_loop import Reaction, score_outcome
 from conversation_engine.memory_manager import RetrievedMemory
+from conversation_engine.prompts import build_decide_and_draft_prompt, build_reflection_prompt
 from conversation_engine.validators import validate
 from storage.postgres_models import BotPersonaCore, UserRelationshipProfile
 
@@ -206,3 +207,34 @@ def test_target_message_block_includes_exact_message_and_thread():
     assert "raw_text: target raw" in block
     assert "cleaned_text: target cleaned" in block
     assert "10 user_1 reply_to=None: parent cleaned" in block
+
+
+def test_decide_and_draft_prompt_combines_gate_target_and_response(default_engine_config):
+    bundle = type(
+        "Bundle",
+        (),
+        {
+            "context": "=== RECENT CHAT ===\nmessage_id=1 sender=user_42 text=btc?",
+        },
+    )()
+
+    prompt, system = build_decide_and_draft_prompt(bundle, default_engine_config)
+
+    assert "DECISION PROMPT: DECIDE_AND_DRAFT" in prompt
+    assert "should_respond" in prompt
+    assert "response_text" in prompt
+    assert "reply_to_message_id" in prompt
+    assert "Return only valid JSON" in system
+
+
+def test_reflection_prompt_handles_learning_tasks():
+    prompt, system = build_reflection_prompt(
+        "meta_reflection",
+        {"feedback_count": 10, "aggregated_feedback": {"overall_trend": 0.2}},
+    )
+
+    assert "REFLECTION PROMPT" in prompt
+    assert "Task: meta_reflection" in prompt
+    assert "what_works" in prompt
+    assert "updated_stance_recommendations" in prompt
+    assert "Return only valid JSON" in system

@@ -32,6 +32,7 @@ from conversation_engine.persona_engine import (
 )
 from conversation_engine.prompts import build_perception_prompt, build_response_decision_prompt
 from conversation_engine.sender import TelegramSender
+from conversation_engine.style_rewriter import LocalStyleRewriter
 from conversation_engine.validators import validate
 from core.logging import get_logger, setup_logging
 from storage.database import async_session_factory, dispose_engine
@@ -40,11 +41,19 @@ log = get_logger(__name__)
 
 
 class ConversationScheduler:
-    def __init__(self, config: EngineConfig, ai_client, sender: TelegramSender, feedback_loop: FeedbackLoop):
+    def __init__(
+        self,
+        config: EngineConfig,
+        ai_client,
+        sender: TelegramSender,
+        feedback_loop: FeedbackLoop,
+        style_rewriter: LocalStyleRewriter | None = None,
+    ):
         self.config = config
         self.ai_client = ai_client
         self.sender = sender
         self.feedback_loop = feedback_loop
+        self.style_rewriter = style_rewriter or LocalStyleRewriter(config)
         self._shutdown = asyncio.Event()
 
     def shutdown(self) -> None:
@@ -205,6 +214,12 @@ class ConversationScheduler:
                     )
                     request2 = await self.ai_client.call_decision_model(decision_prompt, decision_system)
                     decision = parse_response_decision(request2.text)
+                    if decision.should_respond and decision.response_text:
+                        decision.response_text = await self.style_rewriter.rewrite(
+                            context=context.context,
+                            decision=decision.reasoning,
+                            draft=decision.response_text,
+                        )
                     ok, reason = validate(decision, self.config)
                     stored_decision = await memory.insert_ai_decision(
                         chat_id=chat_id,
@@ -287,7 +302,7 @@ async def main() -> None:
     sender = TelegramSender(config)
     await sender.connect()
     feedback_loop = FeedbackLoop(config, ai_client)
-    scheduler = ConversationScheduler(config, ai_client, sender, feedback_loop)
+    scheduler = ConversationScheduler(config, ai_client, sender, feedback_loop, LocalStyleRewriter(config))
 
     loop = asyncio.get_running_loop()
     for sig_name in ("SIGINT", "SIGTERM"):
