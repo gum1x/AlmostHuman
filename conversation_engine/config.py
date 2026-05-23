@@ -87,6 +87,11 @@ class EngineConfig:
     persona_engine: PersonaEngineConfig
     feedback_loop: FeedbackLoopConfig
     engagement_gate: EngagementGateConfig
+    local_style_rewrite_enabled: bool = False
+    local_style_python: str = "python3"
+    local_style_chat_script: str = ""
+    local_style_model_path: str = ""
+    local_style_timeout_seconds: int = 120
 
 
 def _section(data: dict[str, Any], name: str) -> dict[str, Any]:
@@ -107,6 +112,11 @@ def load_engine_config(path: str | Path = "config.toml") -> EngineConfig:
         active_chat_ids=_split_ints(os.getenv("ACTIVE_CHAT_IDS")),
         anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", ""),
         conversation_tg_session_name=os.getenv("CONVERSATION_TG_SESSION_NAME", "conversation"),
+        local_style_rewrite_enabled=os.getenv("LOCAL_STYLE_REWRITE_ENABLED", "false").lower() == "true",
+        local_style_python=os.getenv("LOCAL_STYLE_PYTHON", "python3"),
+        local_style_chat_script=os.getenv("LOCAL_STYLE_CHAT_SCRIPT", ""),
+        local_style_model_path=os.getenv("LOCAL_STYLE_MODEL_PATH", ""),
+        local_style_timeout_seconds=int(os.getenv("LOCAL_STYLE_TIMEOUT_SECONDS", "120")),
         persona=PersonaConfig(**_section(raw, "persona")),
         ai=AiConfig(**_section(raw, "ai")),
         prompt=PromptConfig(**_section(raw, "prompt")),
