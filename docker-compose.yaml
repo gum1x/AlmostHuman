@@ -104,11 +104,18 @@ services:
       CONVERSATION_TG_SESSION_NAME: ${CONVERSATION_TG_SESSION_NAME:-conversation}
       ACTIVE_CHAT_IDS: ${ACTIVE_CHAT_IDS}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL}
+      LOCAL_STYLE_REWRITE_ENABLED: ${LOCAL_STYLE_REWRITE_ENABLED:-false}
+      LOCAL_STYLE_PYTHON: ${LOCAL_STYLE_PYTHON}
+      LOCAL_STYLE_CHAT_SCRIPT: ${LOCAL_STYLE_CHAT_SCRIPT}
+      LOCAL_STYLE_MODEL_PATH: ${LOCAL_STYLE_MODEL_PATH}
+      LOCAL_STYLE_TIMEOUT_SECONDS: ${LOCAL_STYLE_TIMEOUT_SECONDS:-120}
       WORKER_POOL_SIZE: ${WORKER_POOL_SIZE:-5}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     volumes:
       - ./sessions:/app/sessions
       - ./config.toml:/app/config.toml:ro
+      - /home/USER/telegram-style-ai:/home/USER/telegram-style-ai:ro
     depends_on:
       migrate:
         condition: service_completed_successfully
