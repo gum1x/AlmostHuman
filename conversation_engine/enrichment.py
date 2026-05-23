@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 from conversation_engine.config import PromptConfig
@@ -25,6 +26,9 @@ class EnrichedMessage:
     sentiment_score: float
     topic_overlap_score: float
     topics: list[str] = field(default_factory=list)
+    timestamp: datetime | None = None
+    raw_text: str | None = None
+    cleaned_text: str | None = None
 
 
 @dataclass(frozen=True)
@@ -81,6 +85,9 @@ def enrich_messages(messages: list[Message], prompt_config: PromptConfig) -> lis
                 sentiment_score=sentiment_score(text),
                 topic_overlap_score=max(0.0, min(1.0, overlap)),
                 topics=matched,
+                timestamp=message.timestamp,
+                raw_text=message.text_raw,
+                cleaned_text=message.text_cleaned,
             )
         )
     return enriched

@@ -8,7 +8,6 @@ from conversation_engine.ai_client import parse_reflection
 from conversation_engine.config import EngineConfig
 from conversation_engine.memory_manager import ConversationMemoryManager, RetrievedMemory, utcnow
 from conversation_engine.observability import (
-    record_persona_drift,
     record_reflection_triggered,
     record_vector_memory_retrieved,
 )
@@ -177,8 +176,8 @@ FEEDBACK ON THOSE MESSAGES:
 {format_feedback(recent_feedback)}
 
 Reflect on consistency, engagement patterns, what is working, user responses, and tone drift.
-Produce only JSON with keys reflection_text, updated_summary, drift_score, drift_explanation,
-relationship_updates, and tone_adjustments.
+Produce only JSON with keys reflection_text, updated_summary, drift_explanation,
+relationship_updates, and tone_adjustments. Do not invent numeric scores.
 """.strip()
     result = await ai_client.call_perception_model(prompt)
     parsed = parse_reflection(result.text)
@@ -194,9 +193,6 @@ relationship_updates, and tone_adjustments.
         embedding=reflection_embedding,
     )
 
-    if parsed.drift_score > 0.4:
-        await memory.update_persona_core(parsed.updated_summary, embed_text(parsed.updated_summary))
-
     for update in parsed.relationship_updates:
         await memory.upsert_user_relationship(chat_id, update.user_id, update.notes, embed_text(update.notes))
         await write_relationship_memory(memory, chat_id, update.user_id, update.notes)
@@ -209,7 +205,6 @@ relationship_updates, and tone_adjustments.
         importance_score=0.9,
     )
     record_reflection_triggered(trigger)
-    record_persona_drift(parsed.drift_score)
 
 
 async def get_relevant_persona_vectors(
