@@ -12,7 +12,11 @@ from conversation_engine.ai_client import (
 )
 from conversation_engine.bootstrap import run_bootstrap
 from conversation_engine.config import EngineConfig, load_engine_config
-from conversation_engine.context_builder import build_context, build_request2_constraints
+from conversation_engine.context_builder import (
+    build_context,
+    build_request2_constraints,
+    build_target_message_block,
+)
 from conversation_engine.engagement_gate import compute_gate_score
 from conversation_engine.enrichment import build_brief, current_context_text, enrich_messages
 from conversation_engine.feedback_loop import FeedbackLoop, run_meta_reflection
@@ -109,6 +113,11 @@ class ConversationScheduler:
                     enriched = enrich_messages(messages, self.config.prompt)
                     brief = build_brief(enriched)
                     gate = await compute_gate_score(chat_id, enriched, brief, memory, self.config)
+                    outcome_score_24h = await memory.get_avg_feedback_score(chat_id, window_hours=24)
+                    visible_numeric_controls = {
+                        "tension_level": brief.tension_level,
+                        "outcome_score_24h": outcome_score_24h,
+                    }
                     snapshot_message_id = await memory.latest_message_id(chat_id)
                     now = datetime.now(timezone.utc)
                     await memory.upsert_activity_pattern(
@@ -131,7 +140,7 @@ class ConversationScheduler:
                             reply_to_message_id=None,
                             reasoning="engagement gate blocked",
                             gate_score=gate.gate_score,
-                            gate_factors=gate.gate_factors,
+                            gate_factors=visible_numeric_controls,
                         )
                         await memory.record_cycle_success(chat_id)
                         return self.config.scheduler.initial_interval_seconds
@@ -157,7 +166,9 @@ class ConversationScheduler:
                     perception_prompt = (
                         f"{context.context}\n\n"
                         "Decide whether there is a worthwhile opening to respond. "
-                        "Return JSON with should_respond, confidence, reasoning, entry_points, topic."
+                        "Use semantic judgment from the visible conversation, not just numeric scores. "
+                        "Return JSON with should_respond, confidence, reasoning, entry_points, "
+                        "target_message_id, topic, risks, annoying_reason."
                     )
                     request1 = await self.ai_client.call_perception_model(perception_prompt)
                     perception = parse_perception(request1.text)
@@ -173,7 +184,7 @@ class ConversationScheduler:
                             reply_to_message_id=None,
                             reasoning=perception.reasoning,
                             gate_score=gate.gate_score,
-                            gate_factors=gate.gate_factors,
+                            gate_factors=visible_numeric_controls,
                             request1_latency_ms=request1.latency_ms,
                             request1_tokens_used=request1.tokens_used,
                         )
@@ -185,12 +196,19 @@ class ConversationScheduler:
                         latest_reflection=latest_reflection,
                         meta_reflection=None,
                         relationship_profiles=context.relationship_profiles,
+                        target_message_block=build_target_message_block(
+                            enriched,
+                            perception.entry_points
+                            or ([perception.target_message_id] if perception.target_message_id else []),
+                        ),
                     )
                     decision_prompt = (
                         f"{context.context}\n\n{constraints}\n\n"
                         "Draft the response decision. Return JSON matching: "
                         "should_respond, confidence, response_text, reply_to_message_id, reply_to_user_id, "
-                        "reasoning, tone_calibration, stances, persona_alignment_score, feedback_informed."
+                        "target_message_id, reasoning, semantic_risk, annoying_reason, tone_calibration, "
+                        "stances, feedback_informed. "
+                        "If the target message does not actually need a reply, set should_respond=false."
                     )
                     request2 = await self.ai_client.call_decision_model(decision_prompt)
                     decision = parse_response_decision(request2.text)
@@ -206,7 +224,7 @@ class ConversationScheduler:
                         reply_to_message_id=decision.reply_to_message_id,
                         reasoning=decision.reasoning if ok else reason,
                         gate_score=gate.gate_score,
-                        gate_factors=gate.gate_factors,
+                        gate_factors=visible_numeric_controls,
                         request1_latency_ms=request1.latency_ms,
                         request2_latency_ms=request2.latency_ms,
                         request1_tokens_used=request1.tokens_used,

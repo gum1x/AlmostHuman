@@ -6,7 +6,7 @@ import pytest
 
 from conversation_engine.ai_client import ResponseDecision
 from conversation_engine.config import load_engine_config
-from conversation_engine.context_builder import build_context
+from conversation_engine.context_builder import build_context, build_target_message_block
 from conversation_engine.engagement_gate import GateResult, compute_gate_score, score_velocity
 from conversation_engine.enrichment import Brief, EnrichedMessage
 from conversation_engine.feedback_loop import Reaction, score_outcome
@@ -81,18 +81,32 @@ async def test_gate_hard_blocks_high_tension(default_engine_config):
     assert result.gate_factors["blocked"] == "anti_flame_protection"
 
 
-def test_validate_rejects_persona_misalignment(default_engine_config):
+def test_validate_accepts_confident_nonempty_response(default_engine_config):
     decision = ResponseDecision(
         should_respond=True,
         confidence=0.9,
         response_text="hello",
-        persona_alignment_score=0.4,
+    )
+
+    ok, reason = validate(decision, default_engine_config)
+
+    assert ok is True
+    assert reason is None
+
+
+def test_validate_rejects_avoided_users(default_engine_config):
+    default_engine_config.prompt.avoid_users.append(42)
+    decision = ResponseDecision(
+        should_respond=True,
+        confidence=0.9,
+        response_text="hello",
+        reply_to_user_id=42,
     )
 
     ok, reason = validate(decision, default_engine_config)
 
     assert ok is False
-    assert reason == "persona_misalignment:0.4"
+    assert reason == "avoided_user:42"
 
 
 @pytest.mark.asyncio
@@ -144,6 +158,51 @@ async def test_context_builder_injects_persona_and_gate(default_engine_config):
     )
 
     assert "=== VECTOR PERSONA MEMORIES" in bundle.context
-    assert "[interaction] remember this (relevance: 0.80)" in bundle.context
+    assert "[interaction] remember this" in bundle.context
     assert "gate_score: 0.77" in bundle.context
-    assert "user_42: relationship_strength=0.70" in bundle.context
+    assert "tension_level: 0.10" in bundle.context
+    assert "outcome_score_24h: 0.25" in bundle.context
+    assert "candidate_users: user_42" in bundle.context
+    assert "gate_factors" not in bundle.context
+    assert "relationship_strength" not in bundle.context
+    assert "receptiveness" not in bundle.context
+    assert "relevance:" not in bundle.context
+
+
+def test_target_message_block_includes_exact_message_and_thread():
+    messages = [
+        EnrichedMessage(
+            10,
+            -100,
+            1,
+            "parent cleaned",
+            None,
+            0.0,
+            0.0,
+            [],
+            raw_text="parent raw",
+            cleaned_text="parent cleaned",
+        ),
+        EnrichedMessage(
+            11,
+            -100,
+            42,
+            "target cleaned",
+            10,
+            0.1,
+            1.0,
+            ["crypto"],
+            raw_text="target raw",
+            cleaned_text="target cleaned",
+        ),
+    ]
+
+    block = build_target_message_block(messages, [11])
+
+    assert "=== TARGET MESSAGE ===" in block
+    assert "message_id: 11" in block
+    assert "sender: user_42" in block
+    assert "reply_to: 10" in block
+    assert "raw_text: target raw" in block
+    assert "cleaned_text: target cleaned" in block
+    assert "10 user_1 reply_to=None: parent cleaned" in block
