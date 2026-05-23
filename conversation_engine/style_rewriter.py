@@ -80,9 +80,12 @@ Task: Rewrite the draft in the target Telegram style. Keep the same meaning. Ret
 
     def _extract_model_text(self, output: str) -> str:
         lines = [line.strip() for line in output.splitlines() if line.strip()]
-        for idx, line in enumerate(lines):
+        for line in lines:
             if line.startswith("MODEL:"):
                 return line.removeprefix("MODEL:").strip()
+        for idx, line in enumerate(lines):
             if line == "Model loaded" and idx + 1 < len(lines):
-                return lines[idx + 1].strip()
+                next_line = lines[idx + 1].strip()
+                if not next_line.startswith("PROMPT:"):
+                    return next_line
         return lines[-1].strip() if lines else ""
