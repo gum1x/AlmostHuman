@@ -47,6 +47,7 @@ services:
       TG_SESSION_NAME: ${TG_SESSION_NAME:-session}
       TG_PHONE: ${TG_PHONE}
       MONITORED_CHAT_IDS: ${MONITORED_CHAT_IDS}
+      MONITOR_PRIVATE_DMS: ${MONITOR_PRIVATE_DMS:-true}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     volumes:
       - ./sessions:/app/sessions
