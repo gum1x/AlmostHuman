@@ -47,6 +47,11 @@ class SchedulerConfig:
     backoff_multiplier: float = 2.0
     new_message_threshold: int = 3
     worker_pool_size: int = 5
+    monitor_private_dms: bool = True
+    dm_discovery_interval_seconds: int = 15
+    dm_new_message_threshold: int = 1
+    dm_recent_message_limit: int = 20
+    dm_max_active_chats: int = 25
 
 
 @dataclass(frozen=True)

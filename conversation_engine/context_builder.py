@@ -129,8 +129,12 @@ async def build_context(
         for message in enriched_messages[-100:]
     )
     candidate_line = ", ".join(f"user_{user_id}" for user_id in candidate_users) or "none"
+    chat_mode = "private_dm" if chat_id > 0 else "group_chat"
 
     context = f"""
+=== CHAT MODE ===
+{chat_mode}
+
 === RECENT CHAT ===
 {messages}
 

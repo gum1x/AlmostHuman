@@ -581,6 +581,21 @@ class ConversationMemoryManager:
         )
         return list(reversed(result.scalars().all()))
 
+    async def get_recent_private_chat_ids(self, limit: int = 25, active_within_minutes: int = 24 * 60) -> list[int]:
+        since = utcnow() - timedelta(minutes=active_within_minutes)
+        result = await self.session.execute(
+            select(Message.chat_id, func.max(Message.timestamp).label("last_message_at"))
+            .where(
+                Message.chat_id > 0,
+                Message.timestamp >= since,
+                Message.is_deleted.is_(False),
+            )
+            .group_by(Message.chat_id)
+            .order_by(text("last_message_at DESC"))
+            .limit(limit)
+        )
+        return [int(row.chat_id) for row in result.all()]
+
     async def get_messages_after(self, chat_id: int, sent_message_id: int, window_minutes: int) -> list[Message]:
         result = await self.session.execute(
             select(Message)
