@@ -62,7 +62,10 @@ class MessageWorker:
                     )
 
                 chat_repo = ChatRepository(session)
-                await chat_repo.upsert(chat_id=event.chat_id)
+                await chat_repo.upsert(
+                    chat_id=event.chat_id,
+                    chat_type=event.raw.get("chat_type") if event.raw else None,
+                )
 
                 if event.sender_id:
                     member_repo = ChatMemberRepository(session)

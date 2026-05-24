@@ -17,7 +17,7 @@ from conversation_engine.context_builder import (
     build_request2_constraints,
     build_target_message_block,
 )
-from conversation_engine.engagement_gate import compute_gate_score
+from conversation_engine.engagement_gate import GateResult, compute_gate_score
 from conversation_engine.enrichment import build_brief, current_context_text, enrich_messages
 from conversation_engine.feedback_loop import FeedbackLoop, run_meta_reflection
 from conversation_engine.memory_manager import ConversationMemoryManager
@@ -61,33 +61,52 @@ class ConversationScheduler:
         self.feedback_loop.shutdown()
 
     async def run(self) -> None:
-        queue: asyncio.Queue[int] = asyncio.Queue()
+        tasks: dict[int, asyncio.Task] = {}
         for chat_id in self.config.active_chat_ids:
-            await queue.put(chat_id)
-        workers = [
-            asyncio.create_task(self._worker(queue))
-            for _ in range(max(1, self.config.scheduler.worker_pool_size))
-        ]
+            tasks[chat_id] = asyncio.create_task(self._chat_loop(chat_id))
         try:
-            await self._shutdown.wait()
+            while not self._shutdown.is_set():
+                if self.config.scheduler.monitor_private_dms:
+                    for chat_id in await self._discover_private_chat_ids():
+                        if chat_id not in tasks:
+                            tasks[chat_id] = asyncio.create_task(self._chat_loop(chat_id))
+                            await log.ainfo("dm_chat_monitoring_started", chat_id=chat_id)
+                done_ids = [chat_id for chat_id, task in tasks.items() if task.done()]
+                for chat_id in done_ids:
+                    tasks.pop(chat_id, None)
+                await asyncio.sleep(self.config.scheduler.dm_discovery_interval_seconds)
         finally:
-            for worker in workers:
-                worker.cancel()
-            await asyncio.gather(*workers, return_exceptions=True)
+            for task in tasks.values():
+                task.cancel()
+            await asyncio.gather(*tasks.values(), return_exceptions=True)
 
-    async def _worker(self, queue: asyncio.Queue[int]) -> None:
+    async def _discover_private_chat_ids(self) -> list[int]:
+        async with async_session_factory() as session:
+            async with session.begin():
+                memory = ConversationMemoryManager(session)
+                return await memory.get_recent_private_chat_ids(
+                    limit=self.config.scheduler.dm_max_active_chats,
+                )
+
+    async def _chat_loop(self, chat_id: int) -> None:
+        interval = self.config.scheduler.initial_interval_seconds
         while not self._shutdown.is_set():
-            chat_id = await queue.get()
-            interval = self.config.scheduler.initial_interval_seconds
-            try:
-                while not self._shutdown.is_set():
-                    interval = await self._run_cycle(chat_id, interval)
-                    await asyncio.sleep(interval)
-            finally:
-                queue.task_done()
+            interval = await self._run_cycle(chat_id, interval)
+            await asyncio.sleep(interval)
 
     async def _run_cycle(self, chat_id: int, previous_interval: int) -> int:
         raw_context: str | None = None
+        is_private_dm = chat_id > 0
+        new_message_threshold = (
+            self.config.scheduler.dm_new_message_threshold
+            if is_private_dm
+            else self.config.scheduler.new_message_threshold
+        )
+        recent_message_limit = (
+            self.config.scheduler.dm_recent_message_limit
+            if is_private_dm
+            else 50
+        )
         async with async_session_factory() as session:
             async with session.begin():
                 memory = ConversationMemoryManager(session)
@@ -98,31 +117,39 @@ class ConversationScheduler:
                     latest_decision = await memory.get_latest_ai_decision(chat_id)
                     snapshot_before = latest_decision.snapshot_message_id if latest_decision else None
                     new_message_count = await memory.count_messages_after_snapshot(chat_id, snapshot_before)
-                    if new_message_count < self.config.scheduler.new_message_threshold:
+                    if new_message_count < new_message_threshold:
                         return min(
                             self.config.scheduler.max_interval_seconds,
                             int(previous_interval * self.config.scheduler.backoff_multiplier),
                         )
 
                     await seed_persona_core(memory, self.config)
-                    reflection_needed, trigger, messages_since_last = await should_run_self_reflection(
-                        memory, chat_id, self.config
-                    )
-                    if reflection_needed:
-                        await run_self_reflection(
-                            chat_id=chat_id,
-                            memory=memory,
-                            ai_client=self.ai_client,
-                            config=self.config,
-                            trigger=trigger,
-                            messages_since_last=messages_since_last,
+                    if not is_private_dm:
+                        reflection_needed, trigger, messages_since_last = await should_run_self_reflection(
+                            memory, chat_id, self.config
                         )
-                    await run_meta_reflection(chat_id, memory, self.ai_client, self.config)
+                        if reflection_needed:
+                            await run_self_reflection(
+                                chat_id=chat_id,
+                                memory=memory,
+                                ai_client=self.ai_client,
+                                config=self.config,
+                                trigger=trigger,
+                                messages_since_last=messages_since_last,
+                            )
+                        await run_meta_reflection(chat_id, memory, self.ai_client, self.config)
 
-                    messages = await memory.get_recent_messages(chat_id, limit=150)
+                    messages = await memory.get_recent_messages(chat_id, limit=recent_message_limit)
                     enriched = enrich_messages(messages, self.config.prompt)
                     brief = build_brief(enriched)
-                    gate = await compute_gate_score(chat_id, enriched, brief, memory, self.config)
+                    if is_private_dm:
+                        gate = GateResult(
+                            gate_score=1.0,
+                            gate_factors={"mode": "private_dm"},
+                            should_proceed=True,
+                        )
+                    else:
+                        gate = await compute_gate_score(chat_id, enriched, brief, memory, self.config)
                     outcome_score_24h = await memory.get_avg_feedback_score(chat_id, window_hours=24)
                     visible_numeric_controls = {
                         "tension_level": brief.tension_level,
