@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     tg_phone: str = ""
     tg_session_name: str = "session"
     monitored_chat_ids: str = ""
+    monitor_private_dms: bool = True
 
     redis_stream_key: str = "ci:events"
     redis_consumer_group: str = "ci_workers"

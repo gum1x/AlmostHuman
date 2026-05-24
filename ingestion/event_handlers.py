@@ -137,7 +137,7 @@ async def _get_sender_info(event) -> SenderInfo | None:
         return None
 
 
-def _msg_to_raw_dict(msg) -> dict:
+def _msg_to_raw_dict(msg, chat_type: str | None = None) -> dict:
     try:
         return {
             "id": msg.id,
@@ -145,43 +145,61 @@ def _msg_to_raw_dict(msg) -> dict:
             "sender_id": msg.sender_id,
             "text": msg.text,
             "date": msg.date.isoformat() if msg.date else None,
+            "chat_type": chat_type,
+            "is_private": chat_type == "private",
         }
     except Exception:
         return {}
 
 
-def register_handlers(client, producer: QueueProducer, chat_ids: list[int]):
+async def _produce_new_message(event, producer: QueueProducer, chat_type: str) -> None:
+    msg = event.message
+    sender_info = await _get_sender_info(event)
+
+    if sender_info and sender_info.is_bot:
+        return
+
+    ts = msg.date
+    if ts and ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+
+    raw_event = RawTelegramEvent(
+        event_type=EventType.NEW_MESSAGE,
+        message_id=msg.id,
+        chat_id=msg.chat_id,
+        sender_id=msg.sender_id,
+        timestamp=ts,
+        text=msg.text,
+        reply_to_message_id=msg.reply_to.reply_to_msg_id if msg.reply_to else None,
+        forward=_extract_forward(msg.fwd_from),
+        media=_extract_media(msg.media),
+        entities=_extract_entities(msg),
+        grouped_id=msg.grouped_id,
+        sender_info=sender_info,
+        raw=_msg_to_raw_dict(msg, chat_type),
+    )
+
+    try:
+        await producer.produce(raw_event)
+    except Exception:
+        await log.aexception("produce_failed", message_id=msg.id, chat_id=msg.chat_id)
+
+
+def register_handlers(client, producer: QueueProducer, chat_ids: list[int], monitor_private_dms: bool = True):
     chats = chat_ids if chat_ids else None
 
     @client.on(events.NewMessage(chats=chats))
     async def on_new_message(event):
-        msg = event.message
-        sender_info = await _get_sender_info(event)
+        if event.is_private:
+            return
+        await _produce_new_message(event, producer, "group")
 
-        ts = msg.date
-        if ts and ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
-
-        raw_event = RawTelegramEvent(
-            event_type=EventType.NEW_MESSAGE,
-            message_id=msg.id,
-            chat_id=msg.chat_id,
-            sender_id=msg.sender_id,
-            timestamp=ts,
-            text=msg.text,
-            reply_to_message_id=msg.reply_to.reply_to_msg_id if msg.reply_to else None,
-            forward=_extract_forward(msg.fwd_from),
-            media=_extract_media(msg.media),
-            entities=_extract_entities(msg),
-            grouped_id=msg.grouped_id,
-            sender_info=sender_info,
-            raw=_msg_to_raw_dict(msg),
-        )
-
-        try:
-            await producer.produce(raw_event)
-        except Exception:
-            await log.aexception("produce_failed", message_id=msg.id, chat_id=msg.chat_id)
+    if monitor_private_dms:
+        @client.on(events.NewMessage(incoming=True))
+        async def on_private_message(event):
+            if not event.is_private:
+                return
+            await _produce_new_message(event, producer, "private")
 
     @client.on(events.MessageEdited(chats=chats))
     async def on_message_edited(event):
@@ -201,7 +219,7 @@ def register_handlers(client, producer: QueueProducer, chat_ids: list[int]):
             reply_to_message_id=msg.reply_to.reply_to_msg_id if msg.reply_to else None,
             media=_extract_media(msg.media),
             entities=_extract_entities(msg),
-            raw=_msg_to_raw_dict(msg),
+            raw=_msg_to_raw_dict(msg, "private" if event.is_private else "group"),
         )
 
         try:

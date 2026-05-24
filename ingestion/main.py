@@ -12,7 +12,11 @@ log = get_logger(__name__)
 
 async def main():
     setup_logging(settings.log_level, settings.log_json)
-    await log.ainfo("ingestion_starting", chat_ids=settings.chat_ids)
+    await log.ainfo(
+        "ingestion_starting",
+        chat_ids=settings.chat_ids,
+        monitor_private_dms=settings.monitor_private_dms,
+    )
 
     shutdown_event = asyncio.Event()
     manager = TelethonClientManager()
@@ -25,9 +29,13 @@ async def main():
     try:
         await producer.connect()
         client = await manager.connect()
-        register_handlers(client, producer, settings.chat_ids)
+        register_handlers(client, producer, settings.chat_ids, settings.monitor_private_dms)
 
-        await log.ainfo("ingestion_running", monitored_chats=len(settings.chat_ids))
+        await log.ainfo(
+            "ingestion_running",
+            monitored_chats=len(settings.chat_ids),
+            monitor_private_dms=settings.monitor_private_dms,
+        )
 
         await shutdown_event.wait()
         await log.ainfo("shutdown_signal_received")
