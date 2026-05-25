@@ -10,6 +10,12 @@ from pipeline.queue_producer import QueueProducer
 log = get_logger(__name__)
 
 
+def _duration_seconds(value) -> int | None:
+    if value is None:
+        return None
+    return int(round(float(value)))
+
+
 def _extract_media(media) -> MediaMetadata | None:
     if media is None:
         return None
@@ -44,11 +50,11 @@ def _extract_media(media) -> MediaMetadata | None:
         for attr in getattr(doc, "attributes", []):
             if isinstance(attr, types.DocumentAttributeVideo):
                 media_type = "video"
-                duration = attr.duration
+                duration = _duration_seconds(attr.duration)
                 w, h = attr.w, attr.h
             elif isinstance(attr, types.DocumentAttributeAudio):
                 media_type = "voice" if attr.voice else "audio"
-                duration = attr.duration
+                duration = _duration_seconds(attr.duration)
             elif isinstance(attr, types.DocumentAttributeSticker):
                 media_type = "sticker"
             elif isinstance(attr, types.DocumentAttributeAnimated):

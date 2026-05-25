@@ -562,8 +562,8 @@ class ConversationMemoryManager:
                 "failure_count": CircuitBreakerState.failure_count + 1,
                 "last_failure_at": func.now(),
                 "paused_until": text(
-                    f"CASE WHEN failure_count + 1 >= {int(failure_threshold)} "
-                    f"THEN NOW() + INTERVAL '{int(pause_minutes)} minutes' ELSE paused_until END"
+                    f"CASE WHEN circuit_breaker_state.failure_count + 1 >= {int(failure_threshold)} "
+                    f"THEN NOW() + INTERVAL '{int(pause_minutes)} minutes' ELSE circuit_breaker_state.paused_until END"
                 ),
             },
         )
