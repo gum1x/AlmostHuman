@@ -1,19 +1,14 @@
 from __future__ import annotations
 
 import json
-import os
 import time
 from dataclasses import dataclass
 from typing import Any
 
+import httpx
 from pydantic import BaseModel, Field
 
 from conversation_engine.config import EngineConfig
-
-try:
-    from anthropic import AsyncAnthropic
-except ImportError:  # pragma: no cover
-    AsyncAnthropic = None
 
 
 class PerceptionDecision(BaseModel):
@@ -34,12 +29,21 @@ class ResponseDecision(BaseModel):
     reply_to_message_id: int | None = None
     reply_to_user_id: int | None = None
     target_message_id: int | None = None
+    topic: str | None = None
     reasoning: str = ""
     semantic_risk: str = ""
     annoying_reason: str = ""
     tone_calibration: str | None = None
     stances: dict[str, Any] = Field(default_factory=dict)
     feedback_informed: bool = False
+
+
+class ContextSummary(BaseModel):
+    relevant_context: bool = False
+    summary: str = ""
+    target_message_id: int | None = None
+    context_message_ids: list[int] = Field(default_factory=list)
+    reasoning: str = ""
 
 
 class RelationshipUpdate(BaseModel):
@@ -86,40 +90,65 @@ class AiCallResult:
     tokens_used: int
 
 
-class AnthropicAiClient:
+class GrokAiClient:
     def __init__(self, config: EngineConfig):
-        if AsyncAnthropic is None:
-            raise RuntimeError("anthropic package is not installed")
-        if not config.anthropic_api_key:
-            raise RuntimeError("ANTHROPIC_API_KEY is required")
+        if not config.xai_api_key:
+            raise RuntimeError("XAI_API_KEY is required")
         self.config = config
-        base_url = os.getenv("ANTHROPIC_BASE_URL") or None
-        self._client = AsyncAnthropic(api_key=config.anthropic_api_key, base_url=base_url)
+        self._client = httpx.AsyncClient(
+            base_url=config.xai_base_url.rstrip("/"),
+            headers={
+                "Authorization": f"Bearer {config.xai_api_key}",
+                "Content-Type": "application/json",
+            },
+            timeout=httpx.Timeout(45.0, connect=10.0),
+        )
 
     async def call_perception_model(self, prompt: str, system: str | None = None) -> AiCallResult:
-        return await self._call(self.config.ai.perception_model, prompt, system)
+        return await self._call(
+            self.config.ai.perception_model,
+            prompt,
+            system,
+            cache_key="perception",
+        )
 
     async def call_decision_model(self, prompt: str, system: str | None = None) -> AiCallResult:
-        return await self._call(self.config.ai.decision_model, prompt, system)
-
-    async def _call(self, model: str, prompt: str, system: str | None) -> AiCallResult:
-        started = time.perf_counter()
-        response = await self._client.messages.create(
-            model=model,
-            max_tokens=2048,
-            temperature=0.2,
-            system=system or "",
-            messages=[{"role": "user", "content": prompt}],
+        return await self._call(
+            self.config.ai.decision_model,
+            prompt,
+            system,
+            cache_key="decision",
         )
+
+    async def _call(self, model: str, prompt: str, system: str | None, cache_key: str) -> AiCallResult:
+        started = time.perf_counter()
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+
+        response = await self._client.post(
+            "/chat/completions",
+            headers={"x-grok-conv-id": f"{self.config.ai.prompt_version}:{cache_key}"},
+            json={
+                "model": model,
+                "messages": messages,
+                "max_tokens": self.config.ai.max_output_tokens,
+                "temperature": 0.2,
+            },
+        )
+        response.raise_for_status()
+        payload = response.json()
         latency_ms = int((time.perf_counter() - started) * 1000)
-        parts = []
-        for block in response.content:
-            text = getattr(block, "text", None)
-            if text:
-                parts.append(text)
-        usage = getattr(response, "usage", None)
-        tokens = int(getattr(usage, "input_tokens", 0) or 0) + int(getattr(usage, "output_tokens", 0) or 0)
-        return AiCallResult(text="\n".join(parts), latency_ms=latency_ms, tokens_used=tokens)
+        choices = payload.get("choices") or []
+        message = choices[0].get("message", {}) if choices else {}
+        content = message.get("content") or ""
+        usage = payload.get("usage") or {}
+        tokens = int(usage.get("prompt_tokens") or 0) + int(usage.get("completion_tokens") or 0)
+        return AiCallResult(text=content, latency_ms=latency_ms, tokens_used=tokens)
+
+    async def close(self) -> None:
+        await self._client.aclose()
 
 
 class FakeAiClient:
@@ -155,6 +184,20 @@ class FakeAiClient:
         if "Task: outcome_scoring" in prompt:
             return AiCallResult(
                 text=json.dumps({"outcome": "neutral", "score": 0.0}),
+                latency_ms=0,
+                tokens_used=0,
+            )
+        if "Summarize only context needed" in prompt:
+            return AiCallResult(
+                text=json.dumps(
+                    {
+                        "relevant_context": False,
+                        "summary": "",
+                        "target_message_id": None,
+                        "context_message_ids": [],
+                        "reasoning": "fake client",
+                    }
+                ),
                 latency_ms=0,
                 tokens_used=0,
             )
@@ -196,12 +239,55 @@ def extract_json_object(text: str) -> str:
     return stripped[start : end + 1]
 
 
+def _coerce_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "yes", "1"}:
+            return True
+        if lowered in {"false", "no", "0", ""}:
+            return False
+    return bool(value)
+
+
 def parse_perception(text: str) -> PerceptionDecision:
     return PerceptionDecision.model_validate_json(extract_json_object(text))
 
 
 def parse_response_decision(text: str) -> ResponseDecision:
-    return ResponseDecision.model_validate_json(extract_json_object(text))
+    payload = json.loads(extract_json_object(text))
+    confidence = payload.get("confidence")
+    if isinstance(confidence, (int, float)) and confidence > 1:
+        payload["confidence"] = min(float(confidence) / 100, 1.0)
+    if payload.get("response_text") == "":
+        payload["response_text"] = None
+    if not isinstance(payload.get("semantic_risk"), str):
+        payload["semantic_risk"] = str(payload.get("semantic_risk") or "")
+    if not isinstance(payload.get("reasoning"), str):
+        payload["reasoning"] = str(payload.get("reasoning") or "")
+    if not isinstance(payload.get("annoying_reason"), str):
+        payload["annoying_reason"] = str(payload.get("annoying_reason") or "")
+    if not isinstance(payload.get("tone_calibration"), str | type(None)):
+        payload["tone_calibration"] = str(payload.get("tone_calibration") or "")
+    if not isinstance(payload.get("stances"), dict):
+        payload["stances"] = {}
+    return ResponseDecision.model_validate(payload)
+
+
+def parse_context_summary(text: str) -> ContextSummary:
+    payload = json.loads(extract_json_object(text))
+    payload["relevant_context"] = _coerce_bool(payload.get("relevant_context"))
+    if not isinstance(payload.get("summary"), str):
+        payload["summary"] = str(payload.get("summary") or "")
+    if not isinstance(payload.get("reasoning"), str):
+        payload["reasoning"] = str(payload.get("reasoning") or "")
+    if not isinstance(payload.get("context_message_ids"), list):
+        payload["context_message_ids"] = []
+    if not payload["relevant_context"]:
+        payload["summary"] = ""
+        payload["context_message_ids"] = []
+    return ContextSummary.model_validate(payload)
 
 
 def parse_reflection(text: str) -> ReflectionOutput:

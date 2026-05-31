@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from conversation_engine.ai_client import AnthropicAiClient, FakeAiClient
+from conversation_engine.ai_client import FakeAiClient, GrokAiClient
 from conversation_engine.config import EngineConfig, load_engine_config
 from conversation_engine.memory_manager import ConversationMemoryManager
 from conversation_engine.persona_engine import load_embedder, run_self_reflection, seed_persona_core
@@ -71,7 +71,7 @@ async def main() -> None:
     config = load_engine_config()
     setup_logging()
     load_embedder(config.persona_engine.embedding_model)
-    ai_client = AnthropicAiClient(config) if config.anthropic_api_key else FakeAiClient()
+    ai_client = GrokAiClient(config) if config.xai_api_key else FakeAiClient()
     sender = TelegramSender(config)
     bot_user_id = None
     try:
@@ -79,7 +79,12 @@ async def main() -> None:
         bot_user_id = await sender.get_bot_user_id()
     finally:
         await sender.close()
-    await run_bootstrap(config, ai_client, bot_user_id)
+    try:
+        await run_bootstrap(config, ai_client, bot_user_id)
+    finally:
+        close = getattr(ai_client, "close", None)
+        if close:
+            await close()
 
 
 if __name__ == "__main__":
