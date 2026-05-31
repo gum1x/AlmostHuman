@@ -24,12 +24,13 @@ class PersonaConfig:
 
 @dataclass(frozen=True)
 class AiConfig:
-    perception_model: str = "claude-haiku-4-5-20251001"
-    decision_model: str = "claude-sonnet-4-6"
-    total_context_token_budget: int = 80_000
+    perception_model: str = "grok-4.3"
+    decision_model: str = "grok-4.3"
+    total_context_token_budget: int = 6_000
+    max_output_tokens: int = 700
     min_confidence_to_send: float = 0.6
-    prompt_version: str = "v1.0"
-    persona_top_k: int = 5
+    prompt_version: str = "v1.1-grok-compact"
+    persona_top_k: int = 4
 
 
 @dataclass(frozen=True)
@@ -84,7 +85,8 @@ class EngagementGateConfig:
 @dataclass(frozen=True)
 class EngineConfig:
     active_chat_ids: list[int]
-    anthropic_api_key: str
+    xai_api_key: str
+    xai_base_url: str
     conversation_tg_session_name: str
     persona: PersonaConfig
     ai: AiConfig
@@ -118,7 +120,8 @@ def load_engine_config(path: str | Path = "config.toml") -> EngineConfig:
 
     return EngineConfig(
         active_chat_ids=_split_ints(os.getenv("ACTIVE_CHAT_IDS")),
-        anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", ""),
+        xai_api_key=os.getenv("XAI_API_KEY", ""),
+        xai_base_url=os.getenv("XAI_BASE_URL", "https://api.x.ai/v1"),
         conversation_tg_session_name=os.getenv("CONVERSATION_TG_SESSION_NAME", "conversation"),
         local_style_rewrite_enabled=os.getenv("LOCAL_STYLE_REWRITE_ENABLED", "false").lower() == "true",
         local_style_python=os.getenv("LOCAL_STYLE_PYTHON", "python3"),

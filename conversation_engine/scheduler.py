@@ -1,22 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+import random
 import re
 import signal
 from datetime import datetime, timezone
 
 from conversation_engine.ai_client import (
-    AnthropicAiClient,
     FakeAiClient,
-    parse_perception,
+    GrokAiClient,
+    parse_context_summary,
     parse_response_decision,
 )
 from conversation_engine.bootstrap import run_bootstrap
 from conversation_engine.config import EngineConfig, load_engine_config
 from conversation_engine.context_builder import (
+    build_response_context,
     build_context,
-    build_request2_constraints,
-    build_target_message_block,
 )
 from conversation_engine.engagement_gate import GateResult, compute_gate_score
 from conversation_engine.enrichment import build_brief, current_context_text, enrich_messages
@@ -31,9 +31,8 @@ from conversation_engine.persona_engine import (
     write_interaction_memory,
     write_stance_memory,
 )
-from conversation_engine.prompts import build_perception_prompt, build_response_decision_prompt
+from conversation_engine.prompts import build_context_summary_prompt, build_response_decision_prompt
 from conversation_engine.sender import TelegramSender
-from conversation_engine.style_rewriter import LocalStyleRewriter
 from conversation_engine.validators import validate
 from core.logging import get_logger, setup_logging
 from storage.database import async_session_factory, dispose_engine
@@ -115,19 +114,6 @@ def _casual_key(text: str) -> str:
     return " ".join(words)
 
 
-def _safe_casual_reply(text: str) -> str | None:
-    key = _casual_key(text)
-    if not key or any(term in key.split() for term in _UNSAFE_CASUAL_TERMS):
-        return None
-    if key in _CASUAL_REPLIES:
-        return _CASUAL_REPLIES[key]
-    if key in {"test", "testing"}:
-        return "i'm here"
-    if key in {"you there", "u there", "are you there"}:
-        return "yeah"
-    return None
-
-
 def _contains_unsafe_terms(text: str) -> bool:
     return bool(set(_casual_key(text).split()) & _UNSAFE_CASUAL_TERMS)
 
@@ -156,6 +142,123 @@ def _looks_like_question(text: str) -> bool:
     ))
 
 
+# --- New spiky character micro-reply system ---
+# Goal: high-frequency ambient chatting that stands out from mild generic chat.
+# Voice: technically sharp + cynical incentive reading + dry/dark humor.
+# High variance: one-word contempt to short precise observation.
+
+_SPICY_SHORT = [
+    "nope",
+    "mid",
+    "lmao",
+    "this",
+    "exactly",
+    "this is just worse incentives with extra steps",
+]
+
+_SPICY_SOCIAL = [
+    "still here unfortunately",
+    "what's the damage today",
+    "the usual pattern recognition",
+    "yo",
+]
+
+_SPICY_DM_SMALLTALK = [
+    "staring at misaligned incentives",
+    "not touching that one",
+    "the usual, you?",
+    "chillin, incentives look bad as always",
+]
+
+_SPICY_DIRECT_QUESTION = [
+    "haven't looked, probably another abstraction no one needed",
+    "the real issue is always the incentives on the other side",
+    "no strong take, narrative is doing too much work",
+    "idk, this smells like exit liquidity in disguise",
+]
+
+_SPICY_BORED = [
+    "same, the mid is relentless today",
+    "the usual slurry of mid takes",
+    "waiting for one actually clean design",
+]
+
+_SPICY_TECH_NIT = [
+    "this is just worse X with extra fees",
+    "the abstraction here is doing negative work",
+    "incentives are completely misaligned on that one",
+    "actually not terrible for once",
+]
+
+
+def _spiky_micro_reply(key: str, *, is_direct: bool, is_private_dm: bool) -> tuple[str, str, float] | None:
+    """Generate a short reply in the sharp, pattern-noticing character voice.
+    High variance by design. Returns (text, reasoning, confidence).
+    """
+    # Unsafe already filtered before calling this.
+
+    # Pure social / greeting / banter
+    if any(x in key for x in ("hi", "hey", "yo", "gm", "gn", "sup", "wsp", "hello")):
+        return random.choice(_SPICY_SOCIAL), "spiky social: low-effort presence with flavor", 0.85
+
+    if key in {"lol", "lmao", "lmfao"}:
+        return random.choice(["lmao", "yeah this is the cycle", "the usual"]), "spiky: dry reaction to obvious", 0.8
+
+    if any(x in key for x in ("test", "testing")):
+        return "still here, unfortunately", "spiky presence check", 0.9
+
+    if any(x in key for x in ("you there", "u there", "are you there")):
+        return random.choice(["still here unfortunately", "yeah, watching the incentives"]), "spiky: direct ping response", 0.85
+
+    # Social hooks / bored / dead chat
+    if any(p in key for p in ("bored", "dead chat", "this chat dead")):
+        return random.choice(_SPICY_BORED), "spiky: honest read on current chat quality", 0.75
+
+    # Small talk questions
+    if any(x in key for x in ("what you doing", "how you doing", "whats good", "wyd", "hyd")):
+        if is_private_dm:
+            return random.choice(_SPICY_DM_SMALLTALK), "spiky DM small talk: cynical but conversational", 0.8
+        return random.choice(["staring at misaligned incentives", "the usual pattern recognition"]), "spiky direct small talk", 0.8
+
+    # Questions in general (DM or direct)
+    if _looks_like_question(key) or "?" in key:  # key is already cleaned
+        if is_private_dm or is_direct:
+            return random.choice(_SPICY_DIRECT_QUESTION), "spiky: short precise or cynical answer to direct question", 0.78
+        # Ambient question in group - only answer if it feels pattern-worthy (rare for pure micro)
+        return None
+
+    # Very short messages in direct or DM context -> acknowledge with character
+    if (is_direct or is_private_dm) and len(key.split()) <= 6:
+        if random.random() < 0.4:
+            return random.choice(["yeah?", "this", "exactly", "mid"]), "spiky: minimal direct ack with attitude", 0.72
+        return random.choice(["what happened", "the usual?"]), "spiky: direct follow-up, slightly irreverent", 0.7
+
+    # Ambient short social in group
+    if not is_direct and not is_private_dm and len(key.split()) <= 5:
+        if random.random() < 0.3:
+            return random.choice(_SPICY_SHORT), "spiky ambient: low cost distinctive interjection", 0.65
+
+    return None
+
+
+def _safe_casual_reply(text: str) -> str | None:
+    # Legacy thin wrapper — real work now happens in _spiky_micro_reply for character.
+    # We keep a tiny safe path for pure greetings to avoid over-triggering on noise.
+    key = _casual_key(text)
+    if not key or any(term in key.split() for term in _UNSAFE_CASUAL_TERMS):
+        return None
+    if key in {"hi", "hii", "hey", "yo", "yoo", "gm", "gn"}:
+        # Let the spiky path handle it for variance
+        return None
+    if key in {"lol", "lmao", "lmfao"}:
+        return None  # spiky path has better dry variants
+    if key in {"test", "testing"}:
+        return "still here, unfortunately"
+    if key in {"you there", "u there", "are you there"}:
+        return None  # spiky path
+    return None
+
+
 def _is_social_hook(text: str) -> bool:
     key = _casual_key(text)
     if key in _CLOSERS:
@@ -165,6 +268,67 @@ def _is_social_hook(text: str) -> bool:
     return any(phrase in key for phrase in ("bored", "dead chat", "what you doing", "how you doing", "whats good"))
 
 
+def _light_participation_reply(key: str, *, is_direct: bool, is_private_dm: bool) -> tuple[str, str, float] | None:
+    """
+    Ultra-light, high-entropy social presence engine.
+    Purpose: enable "almost always chatting" with tiny, varied, low-commitment noise
+    that feels human and does not fight the fine-tuned voice.
+    Deliberately messy and stochastic.
+    """
+    if not key:
+        return None
+    if _contains_unsafe_terms(key):
+        return None
+
+    # Greetings / ambient social (extremely common in the actual training data)
+    if any(x in key for x in ("hi", "hey", "yo", "gm", "gn", "sup", "wsp", "hello")):
+        if random.random() < 0.65:
+            return random.choice(["yo", "sup", "gm", "lmao", "same", "mhm"]), "light presence: greeting noise", 0.9
+        return random.choice(["yo", "lmao", "nah", "yeah", "this", "fr", "bet", "word"]), "light presence: random social token", 0.85
+
+    if key in {"lol", "lmao", "lmfao", "haha"}:
+        return random.choice(["lmao", "lol", "nah", "fr", "dead", "real", "sheesh", "wild"]), "light: low-effort reaction match", 0.92
+
+    if key in {"test", "testing"}:
+        return random.choice(["here", "yo", "sup", "mhm", "still here"]), "light: test ack", 0.95
+
+    if any(x in key for x in ("you there", "u there", "are you there")):
+        return random.choice(["yeah", "here", "sup", "mhm", "yo"]), "light: direct ping", 0.9
+
+    if any(p in key for p in ("bored", "dead chat", "this chat dead", "anyone alive")):
+        return random.choice(["same", "fr", "dead", "real", "rip", "oof", "yikes"]), "light: acknowledging dead vibe", 0.82
+
+    if any(x in key for x in ("what you doing", "how you doing", "whats good", "wyd", "hyd", "wsp")):
+        if is_private_dm:
+            if random.random() < 0.55:
+                return random.choice(["chillin", "same", "not much", "the usual", "u?"]), "light DM: keeping it going", 0.85
+            return random.choice(["yo", "lmao", "same", "mhm"]), "light DM: low effort reply", 0.8
+        return random.choice(["chillin", "same", "the usual", "lmao"]), "light group: minimal small talk ack", 0.75
+
+    if _looks_like_question(key) or "?" in key:
+        if is_private_dm or is_direct:
+            return random.choice(["idk", "no idea", "probably", "yeah", "nah", "maybe", "fr", "real"]), "light: low-commitment answer", 0.8
+        if random.random() < 0.12:
+            return random.choice(["idk", "nah", "lmao"]), "light: occasional ambient noise", 0.55
+        return None
+
+    if (is_direct or is_private_dm) and len(key.split()) <= 6:
+        if random.random() < 0.65:
+            return random.choice(["yeah", "mhm", "same", "fr", "yo", "lmao", "this"]), "light: minimal direct/DM ack", 0.75
+        return None
+
+    if not is_direct and not is_private_dm and len(key.split()) <= 5:
+        if random.random() < 0.42:
+            return random.choice(["lmao", "yo", "same", "fr", "real", "nah", "this", "wild"]), "light: ambient group noise", 0.65
+        return None
+
+    if is_private_dm and len(key.split()) <= 8:
+        if random.random() < 0.55:
+            return random.choice(["yeah", "mhm", "same", "fr", "yo", random.choice(["lmao", "real", "bet"])]), "light DM: general continuation", 0.7
+
+    return None
+
+
 def _human_motive_reply(text: str, *, is_direct: bool, is_private_dm: bool) -> tuple[str, str, float] | None:
     key = _casual_key(text)
     if not key:
@@ -172,38 +336,32 @@ def _human_motive_reply(text: str, *, is_direct: bool, is_private_dm: bool) -> t
 
     unsafe = _contains_unsafe_terms(text)
     if unsafe and (is_direct or is_private_dm):
-        return "can't help with that", "direct unsafe request; brief refusal", 0.85
+        return "can't help with that", "direct unsafe request; brief refusal (character style)", 0.85
     if unsafe:
         return None
 
+    # Primary path: ultra-light high-entropy social presence (lets the fine-tune carry voice)
+    candidate = _light_participation_reply(key, is_direct=is_direct, is_private_dm=is_private_dm)
+    if candidate:
+        reply, reasoning, conf = candidate
+        return reply, f"light presence: {reasoning}", conf
+
+    # Legacy casual still works as thin fallback for pure safe cases we didn't catch
     casual = _safe_casual_reply(text)
     if casual:
-        return casual, "human motive: simple greeting/banter", 0.9
+        return casual, "legacy casual (thin path)", 0.6
 
+    # Fallback for private DMs that didn't hit spiky logic — keep some life
     if is_private_dm:
         if key in _CLOSERS:
             return None
-        if _looks_like_question(text):
-            if "what you doing" in key or "how you doing" in key or "whats good" in key:
-                return "chillin wbu", "human motive: DM small talk", 0.8
-            return "idk tbh", "human motive: DM question, honest short answer", 0.75
         if len(key.split()) <= 5:
-            return "yeah", "human motive: keep DM conversation alive", 0.7
-        return "what happened", "human motive: DM user seems to want to chat", 0.7
+            return random.choice(["yeah", "this", "go on"]), "spiky DM keep-alive (fallback)", 0.65
+        return "what's the actual situation", "spiky DM: wants the real story", 0.65
 
-    if is_direct:
-        if _looks_like_question(text):
-            if "what is this group" in key or "what's this group" in key:
-                return "idk i just got here", "human motive: directly asked about group", 0.8
-            if "what you doing" in key or "how you doing" in key or "whats good" in key:
-                return "chillin", "human motive: direct small talk", 0.8
-            return "idk tbh", "human motive: direct question to bot", 0.75
-        if len(key.split()) <= 8:
-            return "yeah?", "human motive: direct mention/reply deserves acknowledgement", 0.75
-        return "what happened", "human motive: direct follow-up needs a reply", 0.75
-
-    if len(key.split()) <= 4 and key in {"im bored", "i am bored", "dead chat", "this chat dead"}:
-        return "same", "human motive: bored/open social chat", 0.65
+    # Very light ambient fallback for direct in group (rare)
+    if is_direct and len(key.split()) <= 7:
+        return random.choice(["yeah?", "this", "mid"]), "spiky direct minimal", 0.6
 
     return None
 
@@ -217,7 +375,6 @@ class ConversationScheduler:
         feedback_loop: FeedbackLoop,
         bot_user_id: int | None = None,
         bot_username: str | None = None,
-        style_rewriter: LocalStyleRewriter | None = None,
     ):
         self.config = config
         self.ai_client = ai_client
@@ -225,7 +382,6 @@ class ConversationScheduler:
         self.feedback_loop = feedback_loop
         self.bot_user_id = bot_user_id
         self.bot_username = bot_username.lower() if bot_username else None
-        self.style_rewriter = style_rewriter or LocalStyleRewriter(config)
         self._shutdown = asyncio.Event()
 
     def shutdown(self) -> None:
@@ -332,39 +488,6 @@ class ConversationScheduler:
                         "outcome_score_24h": outcome_score_24h,
                     }
                     snapshot_message_id = await memory.latest_message_id(chat_id)
-                    casual_sent = await self._try_safe_casual_reply(
-                        chat_id=chat_id,
-                        is_private_dm=is_private_dm,
-                        enriched=enriched,
-                        memory=memory,
-                        snapshot_before=snapshot_before,
-                        snapshot_message_id=snapshot_message_id,
-                        new_message_count=new_message_count,
-                        brief=brief,
-                        gate_score=gate.gate_score,
-                        gate_factors=visible_numeric_controls,
-                    )
-                    if casual_sent:
-                        await memory.record_cycle_success(chat_id)
-                        return self.config.scheduler.initial_interval_seconds
-
-                    human_sent = await self._try_human_motive_reply(
-                        chat_id=chat_id,
-                        is_private_dm=is_private_dm,
-                        active_bot_thread=active_bot_thread,
-                        enriched=enriched,
-                        memory=memory,
-                        snapshot_before=snapshot_before,
-                        snapshot_message_id=snapshot_message_id,
-                        new_message_count=new_message_count,
-                        brief=brief,
-                        gate_score=gate.gate_score,
-                        gate_factors=visible_numeric_controls,
-                    )
-                    if human_sent:
-                        await memory.record_cycle_success(chat_id)
-                        return self.config.scheduler.initial_interval_seconds
-
                     now = datetime.now(timezone.utc)
                     await memory.upsert_activity_pattern(
                         chat_id,
@@ -384,30 +507,12 @@ class ConversationScheduler:
                             confidence=0.0,
                             response_text=None,
                             reply_to_message_id=None,
-                            reasoning="engagement gate blocked",
+                            reasoning=f"hard safety gate blocked: {gate.gate_factors.get('blocked', 'unknown')}",
                             gate_score=gate.gate_score,
                             gate_factors=visible_numeric_controls,
                         )
                         await memory.record_cycle_success(chat_id)
                         return self.config.scheduler.initial_interval_seconds
-
-                    await memory.insert_ai_decision(
-                        chat_id=chat_id,
-                        prompt_version=self.config.ai.prompt_version,
-                        snapshot_message_id=snapshot_message_id,
-                        new_message_count=new_message_count,
-                        should_respond=False,
-                        confidence=0.0,
-                        response_text=None,
-                        reply_to_message_id=None,
-                        reasoning="local human-motive decision: no direct address, no open social hook, or unsafe ambient context",
-                        gate_score=gate.gate_score,
-                        gate_factors=visible_numeric_controls,
-                        request1_tokens_used=0,
-                        request2_tokens_used=0,
-                    )
-                    await memory.record_cycle_success(chat_id)
-                    return self.config.scheduler.initial_interval_seconds
 
                     persona_memories, latest_reflection = await get_relevant_persona_vectors(
                         chat_id,
@@ -425,15 +530,13 @@ class ConversationScheduler:
                         persona_memories,
                         latest_reflection,
                         current_persona,
+                        token_budget=self.config.ai.total_context_token_budget,
                     )
                     raw_context = context.context
                     if active_bot_thread:
                         raw_context = (
                             f"{context.context}\n\n"
-                            "=== ACTIVE BOT THREAD ===\n"
-                            "The bot recently sent a message and at least one user replied or spoke after it, or a user directly mentioned the bot. "
-                            "Bias toward responding to the user as part of an ongoing conversation. "
-                            "Use a short natural reply. Do not ignore direct follow-ups just because the wider chat is noisy."
+                            "active_bot_thread: true"
                         )
                         context = type(context)(
                             context=raw_context,
@@ -441,71 +544,27 @@ class ConversationScheduler:
                             relationship_profiles=context.relationship_profiles,
                             avg_feedback_score=context.avg_feedback_score,
                         )
-                    perception_prompt, perception_system = build_perception_prompt(context, self.config)
-                    request1 = await self.ai_client.call_perception_model(perception_prompt, perception_system)
-                    perception = parse_perception(request1.text)
-                    if not perception.should_respond:
-                        fallback_sent = await self._try_direct_attention_fallback(
-                            chat_id=chat_id,
-                            active_bot_thread=active_bot_thread,
-                            enriched=enriched,
-                            memory=memory,
-                            snapshot_before=snapshot_before,
-                            snapshot_message_id=snapshot_message_id,
-                            new_message_count=new_message_count,
-                            brief=brief,
-                            gate_score=gate.gate_score,
-                            gate_factors=visible_numeric_controls,
-                            request1_latency_ms=request1.latency_ms,
-                            request1_tokens_used=request1.tokens_used,
-                            reasoning=perception.reasoning,
-                        )
-                        if fallback_sent:
-                            await memory.record_cycle_success(chat_id)
-                            return self.config.scheduler.initial_interval_seconds
-                        await memory.insert_ai_decision(
-                            chat_id=chat_id,
-                            prompt_version=self.config.ai.prompt_version,
-                            snapshot_message_id=snapshot_message_id,
-                            new_message_count=new_message_count,
-                            should_respond=False,
-                            confidence=perception.confidence,
-                            response_text=None,
-                            reply_to_message_id=None,
-                            reasoning=perception.reasoning,
-                            gate_score=gate.gate_score,
-                            gate_factors=visible_numeric_controls,
-                            request1_latency_ms=request1.latency_ms,
-                            request1_tokens_used=request1.tokens_used,
-                        )
-                        await memory.record_cycle_success(chat_id)
-                        return self.config.scheduler.initial_interval_seconds
 
-                    constraints = build_request2_constraints(
-                        current_persona=current_persona,
-                        latest_reflection=latest_reflection,
-                        meta_reflection=None,
-                        relationship_profiles=context.relationship_profiles,
-                        target_message_block=build_target_message_block(
-                            enriched,
-                            perception.entry_points
-                            or ([perception.target_message_id] if perception.target_message_id else []),
+                    summary_prompt, summary_system = build_context_summary_prompt(context, self.config)
+                    request1 = await self.ai_client.call_perception_model(summary_prompt, summary_system)
+                    context_summary = parse_context_summary(request1.text)
+                    response_context = type(context)(
+                        context=build_response_context(
+                            context.context,
+                            context_summary.summary if context_summary.relevant_context else "",
                         ),
+                        candidate_user_ids=context.candidate_user_ids,
+                        relationship_profiles=context.relationship_profiles,
+                        avg_feedback_score=context.avg_feedback_score,
                     )
+
                     decision_prompt, decision_system = build_response_decision_prompt(
-                        context,
-                        constraints,
-                        perception,
+                        response_context,
+                        "",
                         self.config,
                     )
                     request2 = await self.ai_client.call_decision_model(decision_prompt, decision_system)
                     decision = parse_response_decision(request2.text)
-                    if decision.should_respond and decision.response_text:
-                        decision.response_text = await self.style_rewriter.rewrite(
-                            context=context.context,
-                            decision=decision.reasoning,
-                            draft=decision.response_text,
-                        )
                     ok, reason = validate(decision, self.config)
                     stored_decision = await memory.insert_ai_decision(
                         chat_id=chat_id,
@@ -520,7 +579,6 @@ class ConversationScheduler:
                         gate_score=gate.gate_score,
                         gate_factors=visible_numeric_controls,
                         request1_latency_ms=request1.latency_ms,
-                        request2_latency_ms=request2.latency_ms,
                         request1_tokens_used=request1.tokens_used,
                         request2_tokens_used=request2.tokens_used,
                     )
@@ -551,7 +609,7 @@ class ConversationScheduler:
                         memory,
                         chat_id,
                         decision.reply_to_user_id,
-                        perception.topic,
+                        decision.topic,
                         decision.response_text or "",
                     )
                     for topic, stance in decision.stances.items():
@@ -619,12 +677,21 @@ class ConversationScheduler:
         if tokens & _UNSAFE_CASUAL_TERMS:
             return "can't help with that"
         if "?" in text:
-            return "idk tbh"
-            return "yeah?"
+            # Character fallback for direct follow-ups after the model stayed silent.
+            return random.choice([
+                "haven't dug in, probably another abstraction no one needed",
+                "the incentives here are doing the heavy lifting",
+                "no strong take, narrative is carrying too much",
+            ])
+        return random.choice(["yeah?", "this", "mid", "exactly"])
 
-    def _message_is_direct(self, message, active_bot_thread: bool) -> bool:
+    def _message_is_direct(self, message, active_bot_thread: bool, recent_bot_message_ids: set[int] | None = None) -> bool:
         text = message.text or ""
-        return bool(active_bot_thread or self._mentions_bot(text) or message.reply_to_message_id)
+        if self._mentions_bot(text):
+            return True
+        if active_bot_thread and message.reply_to_message_id in (recent_bot_message_ids or set()):
+            return True
+        return False
 
     async def _send_local_reply(
         self,
@@ -692,11 +759,16 @@ class ConversationScheduler:
             for message in enriched
             if snapshot_before is None or message.message_id > snapshot_before
         ]
+        recent_bot_message_ids = {
+            int(row.sent_message_id)
+            for row in await memory.get_recent_bot_memory(chat_id, limit=5)
+            if row.sent_message_id is not None
+        }
         for message in reversed(new_messages):
             if self.bot_user_id is not None and message.sender_id == self.bot_user_id:
                 continue
             text = message.text or ""
-            is_direct = self._message_is_direct(message, active_bot_thread)
+            is_direct = self._message_is_direct(message, active_bot_thread, recent_bot_message_ids)
             candidate = _human_motive_reply(text, is_direct=is_direct, is_private_dm=is_private_dm)
             if not candidate:
                 continue
@@ -720,7 +792,7 @@ class ConversationScheduler:
                     confidence=0.0,
                     response_text=None,
                     reply_to_message_id=None,
-                    reasoning="local human-motive reply skipped by rate limit",
+                    reasoning="spiky character reply skipped by rate limit",
                     gate_score=gate_score,
                     gate_factors=gate_factors,
                     request1_tokens_used=0,
@@ -741,7 +813,7 @@ class ConversationScheduler:
                 brief=brief,
                 gate_score=gate_score,
                 gate_factors=gate_factors,
-                event_name="local_human_motive_reply_sent",
+                event_name="spiky_character_reply_sent",
             )
             return True
         return False
@@ -769,11 +841,16 @@ class ConversationScheduler:
             for message in enriched
             if snapshot_before is None or message.message_id > snapshot_before
         ]
+        recent_bot_message_ids = {
+            int(row.sent_message_id)
+            for row in await memory.get_recent_bot_memory(chat_id, limit=5)
+            if row.sent_message_id is not None
+        }
         for message in reversed(new_messages):
             if self.bot_user_id is not None and message.sender_id == self.bot_user_id:
                 continue
             text = message.text or ""
-            if not (self._mentions_bot(text) or message.reply_to_message_id):
+            if not (self._mentions_bot(text) or message.reply_to_message_id in recent_bot_message_ids):
                 continue
             reply = self._direct_attention_fallback_text(text)
             stored_decision = await memory.insert_ai_decision(
@@ -785,7 +862,7 @@ class ConversationScheduler:
                 confidence=0.65,
                 response_text=reply,
                 reply_to_message_id=message.message_id,
-                reasoning=f"direct mention/follow-up fallback after Claude declined: {reasoning[:300]}",
+                reasoning=f"direct mention/follow-up fallback after model declined: {reasoning[:300]}",
                 gate_score=gate_score,
                 gate_factors=gate_factors,
                 request1_latency_ms=request1_latency_ms,
@@ -869,7 +946,7 @@ class ConversationScheduler:
                 confidence=0.9,
                 response_text=reply,
                 reply_to_message_id=message.message_id,
-                reasoning="local safe casual reply; skipped Claude for token efficiency",
+                reasoning="local safe casual reply; skipped model call for token efficiency",
                 gate_score=gate_score,
                 gate_factors=gate_factors,
                 request1_tokens_used=0,
@@ -904,7 +981,7 @@ async def main() -> None:
     config = load_engine_config()
     setup_logging()
     load_embedder(config.persona_engine.embedding_model)
-    ai_client = FakeAiClient()
+    ai_client = GrokAiClient(config) if config.xai_api_key else FakeAiClient()
     sender = TelegramSender(config)
     await sender.connect()
     feedback_loop = FeedbackLoop(config, ai_client)
@@ -918,7 +995,6 @@ async def main() -> None:
         feedback_loop,
         bot_user_id,
         bot_username,
-        LocalStyleRewriter(config),
     )
 
     loop = asyncio.get_running_loop()
@@ -929,6 +1005,9 @@ async def main() -> None:
         await run_bootstrap(config, ai_client, bot_user_id)
         await asyncio.gather(scheduler.run(), feedback_loop.run_observation_tasks())
     finally:
+        close = getattr(ai_client, "close", None)
+        if close:
+            await close()
         await sender.close()
         await dispose_engine()
 

@@ -121,7 +121,8 @@ async def compute_gate_score(
     result = GateResult(
         gate_score=max(0.0, min(1.0, gate_score)),
         gate_factors=factors,
-        should_proceed=gate_score >= 0.35,
+        # The score is advisory context for Grok, not a hard model-call gate.
+        should_proceed=True,
     )
     record_gate(result.gate_score, {key: float(value) for key, value in factors.items() if isinstance(value, int | float)})
     return result

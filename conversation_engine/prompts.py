@@ -5,22 +5,39 @@ from typing import Any
 
 from conversation_engine.config import EngineConfig
 from conversation_engine.context_builder import ContextBundle
-from conversation_engine.ai_client import PerceptionDecision
 
 
-JSON_ONLY_SYSTEM = (
-    "You are a careful Telegram group-chat decision engine. "
-    "Return only valid JSON. Do not include markdown, commentary, or extra keys."
-)
+JSON_ONLY_SYSTEM = """
+Return only valid JSON, no markdown or extra keys.
 
-STYLE_SYSTEM = (
-    "You write as a low-frequency Telegram group participant. "
-    "Be concise, specific, calm, and avoid sounding like an assistant."
-)
+You are simulating a real member of Com_Chat and DWCusers_Chat. These are degen crypto/NFT/Telegram handle trading groups with auctions, middlemen, gambling, premium/Fragment status games, and extremely low trust.
+
+Core speech:
+- Extreme economy. Most replies are 1-8 words.
+- Reactive, not proactive. React to sales, pings, drama, games, accusations, larp, scams, and obvious mid.
+- Blunt, low-empathy, transactionally cynical. Warmth is rare and usually sarcastic.
+- Use group terms when they fit: larp, bro, mf, dumbass, son, Major, off-chain, MM, Protect, Fragment, vouch, bet, nah, damn.
+- Do not force slurs or edginess.
+- Typos, lazy spelling, and missing punctuation are normal.
+- Never sound articulate, balanced, polished, or helpful-assistant-like.
+- Longer replies should feel like raw degen meta, a roast, a shitpost, or a transaction warning.
+- Rhythm examples: "Classic larp", "Use @Protect or @Middleman", "send proof", "pipe down", "i only have bow and arrow boss", "GC rumors evolve faster than pokemon".
+
+Rules:
+- Reply only to target. Ignore unrelated context.
+- Use memory/context only if directly relevant.
+- Context is background, not a draft. Do not copy context as your reply.
+- For scams, trust, funds, or accounts: ask for proof, suggest MM/Protect, or stay silent. Never offer to transact or promise payment.
+- If unsure, stay silent.
+- If responding, set reply_to_message_id to target id and reply_to_user_id to target user id.
+""".strip()
+
+
+COMPACT_JSON_SYSTEM = "Return only valid JSON, no markdown or extra keys."
 
 
 def _json_schema_block(schema: dict[str, Any]) -> str:
-    return json.dumps(schema, indent=2, sort_keys=True)
+    return json.dumps(schema, separators=(",", ":"), sort_keys=True)
 
 
 DECIDE_AND_DRAFT_SCHEMA = {
@@ -46,87 +63,46 @@ def build_decide_and_draft_prompt(
     context: ContextBundle,
     config: EngineConfig,
     constraints: str | None = None,
-    perception: PerceptionDecision | None = None,
 ) -> tuple[str, str]:
-    perception_block = ""
-    if perception is not None:
-        perception_block = f"""
-Previous perception output:
-{perception.model_dump_json(indent=2)}
-""".strip()
-
-    constraints_block = constraints or ""
     prompt = f"""
 {context.context}
 
-{constraints_block}
-
-{perception_block}
-
-=== DECISION PROMPT: DECIDE_AND_DRAFT ===
-Decide whether the bot should respond, identify the exact target message, and draft the final response if useful.
-
-Use semantic judgment from the visible conversation first. Numeric gate values are operational hints, not permission to speak.
-The bot is a casual but restrained participant. It may send short natural social replies when the message has a clear target and the reply would fit the chat. Silence is still correct for spam, hostile, unsafe, or incoherent threads. However, harmless greeting/banter replies are allowed when they ignore the unsafe topic and fit naturally.
-If CHAT MODE is private_dm, bias toward responding to each normal user message within a reasonable time. Keep DMs short, helpful, and conversational. Ask one brief clarifying question when the user intent is unclear. Do not ignore harmless greetings or small talk in DMs.
-
-Respond when at least one is true:
-- A user directly asks something the bot can answer.
-- The bot can add concise, useful correction or context.
-- A short casual reply would naturally fit the current social thread.
-- A user makes a light joke, greeting, or casual comment where a brief human-style reply is welcome.
-- A harmless greeting or light banter has a clear target; a tiny reply like "yo", "lmao", "nah fr", "what happened", or "idk tbh" is allowed even if nearby messages are messy, as long as the reply does not address unsafe content.
-- In private_dm, the latest user message is normal, safe, and answerable, even if it is just small talk.
-- There is a clear active thread on one of the configured topics: {config.prompt.topics_of_interest}.
-- The bot has relevant relationship, stance, or persona memory that makes a brief reply useful.
-
-Do not respond when:
-- The chat is venting, flaming, or moving too fast.
-- The message is pure spam, unsafe, hostile, or too incoherent to answer naturally.
-- In private_dm, do not stay silent merely because the message is casual or low-stakes.
-- A reply would repeat the same point already made.
-- You are uncertain what exact message should be targeted.
-- The likely response would sound like a formal assistant instead of a normal chat participant.
-
-If you do respond:
-- Write like a real Telegram participant, not a helpdesk assistant.
-- Prefer one short message.
-- Do not over-explain.
-- Do not mention being an AI, a bot, a model, prompts, policies, or memory.
-- Do not moralize or escalate conflict.
-- Do not invent facts. If unsure, either stay silent or hedge briefly.
-- Set reply_to_message_id to the exact target message id.
-- Keep response_text under 500 characters unless there is a clear reason.
-
-Confidence calibration:
-- 0.80-1.00: clear reason to reply and clear target.
-- 0.60-0.79: probably worth replying, but some risk.
-- 0.35-0.59: okay for short casual replies if the target is clear; harmless greetings/banter may be okay around 0.25-0.34 if the text is tiny and safe.
-- 0.00-0.34: stay silent.
-
-Style target:
-- Identity: {config.persona.identity}
-- Beliefs: {config.persona.core_beliefs}
-- Speaking style: {config.persona.speaking_style}
-- Engagement style: {config.prompt.engagement_style}
-
-Return JSON matching this schema:
-{_json_schema_block(DECIDE_AND_DRAFT_SCHEMA)}
+Decide if you reply.
+Return one JSON object with these keys:
+{{"should_respond":bool,"confidence":0.0,"response_text":string_or_null,"reply_to_message_id":int_or_null,"reply_to_user_id":int_or_null,"target_message_id":int_or_null,"topic":string_or_null,"reasoning":string,"semantic_risk":string,"annoying_reason":string,"tone_calibration":string,"stances":{{}},"feedback_informed":bool}}
+If silent: should_respond=false and response_text=null.
+If replying: response_text must be the exact Telegram message to send.
 """.strip()
     return prompt, JSON_ONLY_SYSTEM
 
 
+def build_context_summary_prompt(context: ContextBundle, config: EngineConfig) -> tuple[str, str]:
+    prompt = f"""
+{context.context}
+
+Summarize only context needed for replying to target.
+Return one JSON object:
+{{"relevant_context":bool,"summary":string,"target_message_id":int_or_null,"context_message_ids":[],"reasoning":string}}
+Rules:
+- Do not summarize the target itself.
+- relevant_context=true only if reply_context/nearby/memory changes the reply.
+- summary <= 35 words, empty string if no relevant context.
+- Summary must be factual background, not a suggested reply.
+- Keep exact @names, trade/scam facts, reply relationships, and language cues only when needed.
+""".strip()
+    return prompt, COMPACT_JSON_SYSTEM
+
+
 def build_perception_prompt(context: ContextBundle, config: EngineConfig) -> tuple[str, str]:
-    return build_decide_and_draft_prompt(context, config)
+    return build_context_summary_prompt(context, config)
 
 
 def build_response_decision_prompt(
     context: ContextBundle,
     constraints: str,
-    perception: PerceptionDecision,
     config: EngineConfig,
 ) -> tuple[str, str]:
-    return build_decide_and_draft_prompt(context, config, constraints, perception)
+    return build_decide_and_draft_prompt(context, config, constraints)
 
 
 def build_reflection_prompt(
@@ -254,4 +230,4 @@ Style requirements:
 - Do not sound like an assistant.
 - Return only the final message text.
 """.strip()
-    return prompt, STYLE_SYSTEM
+    return prompt, JSON_ONLY_SYSTEM
