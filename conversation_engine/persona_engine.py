@@ -12,6 +12,9 @@ from conversation_engine.observability import (
     record_vector_memory_retrieved,
 )
 from conversation_engine.prompts import build_self_reflection_prompt
+from core.logging import get_logger
+
+log = get_logger(__name__)
 
 try:
     from sentence_transformers import SentenceTransformer
@@ -165,8 +168,14 @@ async def run_self_reflection(
         recent_messages=format_recent_messages(recent_messages),
         feedback=format_feedback(recent_feedback),
     )
-    result = await ai_client.call_perception_model(prompt, system)
-    parsed = parse_reflection(result.text)
+
+    try:
+        result = await ai_client.call_perception_model(prompt, system)
+        parsed = parse_reflection(result.text)
+    except Exception as exc:
+        await log.awarning("self_reflection_skipped_model_error", error=str(exc)[:300])
+        return  # Don't fail the whole cycle just because reflection couldn't run
+
     reflection_embedding = embed_text(parsed.reflection_text)
 
     await memory.insert_self_reflection(

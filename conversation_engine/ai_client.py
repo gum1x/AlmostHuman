@@ -31,11 +31,13 @@ class ResponseDecision(BaseModel):
     target_message_id: int | None = None
     topic: str | None = None
     reasoning: str = ""
+    plan: str = ""  # High-level intent/strategy from smart model. Used to guide local phrasing model. "what we are actually doing"
     semantic_risk: str = ""
     annoying_reason: str = ""
     tone_calibration: str | None = None
     stances: dict[str, Any] = Field(default_factory=dict)
     feedback_informed: bool = False
+    updated_engagement_posture: str | None = None  # Optional note from the character about shift in its own energy/mode (for persistent rhythm)
 
 
 class ContextSummary(BaseModel):
@@ -92,16 +94,15 @@ class AiCallResult:
 
 class GrokAiClient:
     def __init__(self, config: EngineConfig):
-        if not config.xai_api_key:
-            raise RuntimeError("XAI_API_KEY is required")
+        key = config.xai_api_key or "sk-local"
         self.config = config
         self._client = httpx.AsyncClient(
             base_url=config.xai_base_url.rstrip("/"),
             headers={
-                "Authorization": f"Bearer {config.xai_api_key}",
+                "Authorization": f"Bearer {key}",
                 "Content-Type": "application/json",
             },
-            timeout=httpx.Timeout(45.0, connect=10.0),
+            timeout=httpx.Timeout(120.0, connect=15.0),  # more generous for local models
         )
 
     async def call_perception_model(self, prompt: str, system: str | None = None) -> AiCallResult:
@@ -216,9 +217,11 @@ class FakeAiClient:
                     "response_text": None,
                     "target_message_id": None,
                     "reasoning": "fake client",
+                    "plan": "",
                     "semantic_risk": "",
                     "annoying_reason": "",
                     "feedback_informed": False,
+                    "updated_engagement_posture": None,
                 }
             ),
             latency_ms=0,
@@ -266,12 +269,16 @@ def parse_response_decision(text: str) -> ResponseDecision:
         payload["semantic_risk"] = str(payload.get("semantic_risk") or "")
     if not isinstance(payload.get("reasoning"), str):
         payload["reasoning"] = str(payload.get("reasoning") or "")
+    if not isinstance(payload.get("plan"), str):
+        payload["plan"] = str(payload.get("plan") or payload.get("reasoning") or "")
     if not isinstance(payload.get("annoying_reason"), str):
         payload["annoying_reason"] = str(payload.get("annoying_reason") or "")
     if not isinstance(payload.get("tone_calibration"), str | type(None)):
         payload["tone_calibration"] = str(payload.get("tone_calibration") or "")
     if not isinstance(payload.get("stances"), dict):
         payload["stances"] = {}
+    if not isinstance(payload.get("updated_engagement_posture"), str | type(None)):
+        payload["updated_engagement_posture"] = None
     return ResponseDecision.model_validate(payload)
 
 

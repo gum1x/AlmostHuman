@@ -71,7 +71,15 @@ async def main() -> None:
     config = load_engine_config()
     setup_logging()
     load_embedder(config.persona_engine.embedding_model)
-    ai_client = GrokAiClient(config) if config.xai_api_key else FakeAiClient()
+    key = (config.xai_api_key or "").strip().lower()
+    base = (config.xai_base_url or "").strip()
+
+    is_dummy_key = key in ("", "sk-local", "sk-dummy", "local", "ollama", "vllm", "none")
+    is_xai_default = "api.x.ai" in base
+
+    # Only use real client if we have a non-dummy key OR an explicit non-xAI base URL (local server)
+    use_real_client = bool(config.xai_api_key) and not (is_dummy_key and is_xai_default)
+    ai_client = GrokAiClient(config) if use_real_client else FakeAiClient()
     sender = TelegramSender(config)
     bot_user_id = None
     try:

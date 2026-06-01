@@ -9,10 +9,12 @@ from datetime import datetime, timezone
 from conversation_engine.ai_client import (
     FakeAiClient,
     GrokAiClient,
+    ResponseDecision,
     parse_context_summary,
     parse_response_decision,
 )
 from conversation_engine.bootstrap import run_bootstrap
+from conversation_engine.style_rewriter import LocalStyleRewriter
 from conversation_engine.config import EngineConfig, load_engine_config
 from conversation_engine.context_builder import (
     build_response_context,
@@ -382,6 +384,7 @@ class ConversationScheduler:
         self.feedback_loop = feedback_loop
         self.bot_user_id = bot_user_id
         self.bot_username = bot_username.lower() if bot_username else None
+        self.style_rewriter = LocalStyleRewriter(config)
         self._shutdown = asyncio.Event()
 
     def shutdown(self) -> None:
@@ -521,6 +524,20 @@ class ConversationScheduler:
                         top_k=self.config.ai.persona_top_k,
                     )
                     current_persona = await memory.get_persona_core()
+
+                    # Build lightweight "my recent activity as me" for the smart model
+                    # so it has persistent memory of its own engagement (key for natural timing).
+                    recent_bot_mem = await memory.get_recent_bot_memory(chat_id, limit=6)
+                    recent_activity_lines = []
+                    for bm in recent_bot_mem:
+                        if bm.response_text:
+                            recent_activity_lines.append(
+                                f"I said (to user_{bm.reply_to_user_id or '?'}): {bm.response_text[:120]}"
+                            )
+                            if bm.reasoning:
+                                recent_activity_lines.append(f"  (my reasoning at the time: {bm.reasoning[:100]})")
+                    recent_bot_activity = "\n".join(recent_activity_lines) if recent_activity_lines else ""
+
                     context = await build_context(
                         chat_id,
                         enriched,
@@ -531,6 +548,7 @@ class ConversationScheduler:
                         latest_reflection,
                         current_persona,
                         token_budget=self.config.ai.total_context_token_budget,
+                        recent_bot_activity=recent_bot_activity,
                     )
                     raw_context = context.context
                     if active_bot_thread:
@@ -548,23 +566,69 @@ class ConversationScheduler:
                     summary_prompt, summary_system = build_context_summary_prompt(context, self.config)
                     request1 = await self.ai_client.call_perception_model(summary_prompt, summary_system)
                     context_summary = parse_context_summary(request1.text)
-                    response_context = type(context)(
-                        context=build_response_context(
-                            context.context,
-                            context_summary.summary if context_summary.relevant_context else "",
-                        ),
+
+                    # For the smart model decision, give it the richer self-referential context
+                    # (persona + recent activity as itself + posture signals) so it can think
+                    # like a real participant with its own history and rhythm.
+                    # The perception summary is still used to keep things focused, but we feed
+                    # the fuller participant view for the actual "as this character" decision.
+                    decision_context = type(context)(
+                        context=context.context,  # the enriched version with WHO I AM, MY RECENT ACTIVITY, etc.
                         candidate_user_ids=context.candidate_user_ids,
                         relationship_profiles=context.relationship_profiles,
                         avg_feedback_score=context.avg_feedback_score,
                     )
 
+                    # Lightweight "my current engagement signals" for the character to read as its posture.
+                    # This helps the smart model have an internal sense of its own rhythm/energy
+                    # so it naturally selects when to speak vs stay quiet.
+                    posture_signals = []
+                    if brief and brief.tension_level is not None:
+                        posture_signals.append(f"tension in room: {brief.tension_level:.1f}")
+                    if visible_numeric_controls.get("outcome_score_24h") is not None:
+                        posture_signals.append(f"my recent outcomes: {visible_numeric_controls['outcome_score_24h']:.2f}")
+                    # Rough activity level from new messages since last snapshot
+                    posture_signals.append(f"new messages since I last spoke: {new_message_count}")
+                    posture_block = " | ".join(posture_signals) if posture_signals else ""
+
+                    if posture_block:
+                        # Append as part of the character's self-view for this decision
+                        enriched_for_decision = f"{context.context}\n\n=== MY CURRENT ENGAGEMENT SIGNALS ===\n{posture_block}"
+                        decision_context = type(context)(
+                            context=enriched_for_decision,
+                            candidate_user_ids=context.candidate_user_ids,
+                            relationship_profiles=context.relationship_profiles,
+                            avg_feedback_score=context.avg_feedback_score,
+                        )
+
+                    # === HYBRID ARCHITECTURE ===
+                    # Smart model = the actual participant character (rich constructed personality).
+                    # It decides when to speak, who, and the *rough high-level meaning/intent*
+                    # using its own persistent history and current posture.
+                    # The fine-tuned local model is the dumb voice renderer only — it gets a
+                    # minimal prompt with the rough plan + tiny context and turns it into
+                    # the real cracked group phrasing. Smart model does NOT craft low-level text.
                     decision_prompt, decision_system = build_response_decision_prompt(
-                        response_context,
+                        decision_context,
                         "",
                         self.config,
                     )
                     request2 = await self.ai_client.call_decision_model(decision_prompt, decision_system)
                     decision = parse_response_decision(request2.text)
+
+                    if decision.should_respond and self.style_rewriter.enabled:
+                        plan_signal = (decision.plan or decision.reasoning or "").strip()
+                        if plan_signal:
+                            phrased = await self.style_rewriter.phrase(
+                                context=raw_context or "",
+                                plan=plan_signal,
+                                target_message="",  # the full context already includes the target block
+                                tone=decision.tone_calibration or "",
+                            )
+                            if phrased and phrased.strip():
+                                decision.response_text = phrased
+                            # otherwise fall back to any sketch the smart model provided
+
                     ok, reason = validate(decision, self.config)
                     stored_decision = await memory.insert_ai_decision(
                         chat_id=chat_id,
@@ -575,7 +639,10 @@ class ConversationScheduler:
                         confidence=decision.confidence,
                         response_text=decision.response_text,
                         reply_to_message_id=decision.reply_to_message_id,
-                        reasoning=decision.reasoning if ok else reason,
+                        reasoning=(
+                            (decision.reasoning or "")
+                            + (f" | posture update: {decision.updated_engagement_posture}" if decision.updated_engagement_posture else "")
+                        ) if ok else reason,
                         gate_score=gate.gate_score,
                         gate_factors=visible_numeric_controls,
                         request1_latency_ms=request1.latency_ms,
@@ -981,7 +1048,15 @@ async def main() -> None:
     config = load_engine_config()
     setup_logging()
     load_embedder(config.persona_engine.embedding_model)
-    ai_client = GrokAiClient(config) if config.xai_api_key else FakeAiClient()
+    key = (config.xai_api_key or "").strip().lower()
+    base = (config.xai_base_url or "").strip()
+
+    is_dummy_key = key in ("", "sk-local", "sk-dummy", "local", "ollama", "vllm", "none")
+    is_xai_default = "api.x.ai" in base
+
+    # Only use real client if we have a non-dummy key OR an explicit non-xAI base URL (local server)
+    use_real_client = bool(config.xai_api_key) and not (is_dummy_key and is_xai_default)
+    ai_client = GrokAiClient(config) if use_real_client else FakeAiClient()
     sender = TelegramSender(config)
     await sender.connect()
     feedback_loop = FeedbackLoop(config, ai_client)
