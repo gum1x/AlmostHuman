@@ -10,3 +10,26 @@ dist/
 build/
 .mypy_cache/
 client_secret*.json
+
+# macOS / editor junk
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+*.swp
+*.swo
+*~
+
+# Local model / research artifacts (uncomment if desired)
+# exports/
+# *.jsonl
+# tests/style_matching/*.jsonl
+# tests/style_matching/*.md
+
+# VPS / deployment
+.env.vps
+.env.local
+docker-compose.override.yml
+sessions/*.session
+

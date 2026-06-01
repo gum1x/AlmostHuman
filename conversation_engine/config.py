@@ -101,6 +101,9 @@ class EngineConfig:
     local_style_chat_script: str = ""
     local_style_model_path: str = ""
     local_style_timeout_seconds: int = 120
+    use_local_model_for_responses: bool = False  # Legacy flag (no longer used). Hybrid is now the default: smart model (Grok) for decisions+plan, local for phrasing when LOCAL_STYLE_REWRITE_ENABLED + http mode configured.
+    local_inference_mode: str = "subprocess"  # "subprocess" or "http" — http is required for VPS (container calls host inference server)
+    local_inference_url: str = ""  # e.g. http://172.17.0.1:8765/generate . Required for http mode.
 
 
 def _section(data: dict[str, Any], name: str) -> dict[str, Any]:
@@ -128,6 +131,9 @@ def load_engine_config(path: str | Path = "config.toml") -> EngineConfig:
         local_style_chat_script=os.getenv("LOCAL_STYLE_CHAT_SCRIPT", ""),
         local_style_model_path=os.getenv("LOCAL_STYLE_MODEL_PATH", ""),
         local_style_timeout_seconds=int(os.getenv("LOCAL_STYLE_TIMEOUT_SECONDS", "120")),
+        use_local_model_for_responses=os.getenv("USE_LOCAL_MODEL_FOR_RESPONSES", "false").lower() == "true",
+        local_inference_mode=os.getenv("LOCAL_INFERENCE_MODE", "subprocess").lower(),
+        local_inference_url=os.getenv("LOCAL_INFERENCE_URL", ""),
         persona=PersonaConfig(**_section(raw, "persona")),
         ai=AiConfig(**_section(raw, "ai")),
         prompt=PromptConfig(**_section(raw, "prompt")),

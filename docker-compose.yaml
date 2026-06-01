@@ -104,19 +104,29 @@ services:
       TG_PHONE: ${TG_PHONE}
       CONVERSATION_TG_SESSION_NAME: ${CONVERSATION_TG_SESSION_NAME:-conversation}
       ACTIVE_CHAT_IDS: ${ACTIVE_CHAT_IDS}
+      # Main AI (perception + decision). Use local OpenAI-compatible server on VPS by setting these:
       XAI_API_KEY: ${XAI_API_KEY}
       XAI_BASE_URL: ${XAI_BASE_URL:-https://api.x.ai/v1}
+      # Local fine-tuned style rewriter (Qwen etc). Enable on VPS:
       LOCAL_STYLE_REWRITE_ENABLED: ${LOCAL_STYLE_REWRITE_ENABLED:-false}
       LOCAL_STYLE_PYTHON: ${LOCAL_STYLE_PYTHON}
       LOCAL_STYLE_CHAT_SCRIPT: ${LOCAL_STYLE_CHAT_SCRIPT}
       LOCAL_STYLE_MODEL_PATH: ${LOCAL_STYLE_MODEL_PATH}
       LOCAL_STYLE_TIMEOUT_SECONDS: ${LOCAL_STYLE_TIMEOUT_SECONDS:-120}
+      # Hybrid mode: smart model (Grok) for cognition/decisions/plan, local for phrasing.
+      # Set these two for reliable operation from inside the container (http server on host).
+      LOCAL_INFERENCE_MODE: ${LOCAL_INFERENCE_MODE:-http}
+      LOCAL_INFERENCE_URL: ${LOCAL_INFERENCE_URL:-http://172.17.0.1:8765/generate}
       WORKER_POOL_SIZE: ${WORKER_POOL_SIZE:-5}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     volumes:
       - ./sessions:/app/sessions
       - ./config.toml:/app/config.toml:ro
-      - /home/USER/telegram-style-ai:/home/USER/telegram-style-ai:ro
+      # Mount your local model dir from the VPS host.
+      # Set LOCAL_STYLE_MOUNT_HOST on the host or in .env to override (default assumes user "x").
+      - ${LOCAL_STYLE_MOUNT_HOST:-/home/USER/telegram-style-ai}:/home/USER/telegram-style-ai:ro
+      # If your local LLM server runs on the host and you need to reach it from inside the container,
+      # you may need an extra_hosts or use the host IP (e.g. 172.17.0.1 on Docker Linux).
     depends_on:
       migrate:
         condition: service_completed_successfully

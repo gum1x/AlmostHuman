@@ -236,6 +236,7 @@ async def build_context(
     latest_reflection: BotSelfReflection | None,
     current_persona: BotPersonaCore | None,
     token_budget: int = 6_000,
+    recent_bot_activity: str = "",
 ) -> ContextBundle:
     candidate_users = get_candidate_user_ids(enriched_messages)
     profiles = await memory.get_relationship_profiles(chat_id, candidate_users)
@@ -254,6 +255,29 @@ async def build_context(
         lines.append(f"signals: tension={brief.tension_level:.2f} feedback={avg_feedback:.2f}")
     _add_optional_section(lines, "memory:", format_vector_memories(persona_memories))
     _add_optional_section(lines, "users:", _format_relationship_profiles(profiles))
+
+    # === Self-referential blocks for the smart model as a real participant ===
+    # These give the character its own history and current state so it can have
+    # natural timing/engagement rhythm instead of pure per-cycle external judgment.
+    if current_persona:
+        lines.append("=== WHO I AM (my character) ===")
+        lines.append(current_persona.identity_summary or "")
+        if current_persona.core_beliefs:
+            lines.append("Core beliefs: " + " | ".join(current_persona.core_beliefs))
+        if current_persona.speaking_style:
+            lines.append("How I talk: " + current_persona.speaking_style)
+
+    if latest_reflection:
+        lines.append("=== MY LATEST SELF-REFLECTION ===")
+        lines.append(latest_reflection.updated_summary or latest_reflection.reflection_text or "")
+
+    # Recent activity as the character (critical for natural timing and "my" rhythm)
+    # The smart model uses this to know what it's been doing lately as itself,
+    # so it can decide whether something feels like a continuation of *its* energy or not.
+    if recent_bot_activity.strip():
+        lines.append("=== MY RECENT ACTIVITY AS ME ===")
+        lines.append(recent_bot_activity.strip())
+
     context = "\n".join(lines).strip()
     return ContextBundle(
         context=context,
