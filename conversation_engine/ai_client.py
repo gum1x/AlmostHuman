@@ -111,6 +111,7 @@ class GrokAiClient:
             prompt,
             system,
             cache_key="perception",
+            temperature=0.2,
         )
 
     async def call_decision_model(self, prompt: str, system: str | None = None) -> AiCallResult:
@@ -119,9 +120,10 @@ class GrokAiClient:
             prompt,
             system,
             cache_key="decision",
+            temperature=0.8,
         )
 
-    async def _call(self, model: str, prompt: str, system: str | None, cache_key: str) -> AiCallResult:
+    async def _call(self, model: str, prompt: str, system: str | None, cache_key: str, temperature: float = 0.2) -> AiCallResult:
         started = time.perf_counter()
         messages = []
         if system:
@@ -135,7 +137,7 @@ class GrokAiClient:
                 "model": model,
                 "messages": messages,
                 "max_tokens": self.config.ai.max_output_tokens,
-                "temperature": 0.2,
+                "temperature": temperature,
             },
         )
         response.raise_for_status()
