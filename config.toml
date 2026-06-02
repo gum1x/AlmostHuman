@@ -43,3 +43,6 @@ anti_flame_tension_threshold = 0.75
 velocity_window_minutes = 10
 thread_repeat_penalty_count = 2
 max_fatigue_score = 1.0
+min_gate_score_to_send = 0.25
+max_group_responses_per_10min = 3
+same_thread_cooldown_minutes = 30
