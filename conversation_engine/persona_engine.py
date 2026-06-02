@@ -207,10 +207,15 @@ async def get_relevant_persona_vectors(
     current_context_text: str,
     memory: ConversationMemoryManager,
     top_k: int = 5,
+    persona_description: str = "",
 ) -> tuple[list[RetrievedMemory], Any]:
+    # Persona-conditioned query: blend persona description with context so
+    # retrieved memories are both topically relevant AND stylistically consistent
+    # with the character (PersonaRAG technique).
+    query_text = f"{persona_description} {current_context_text}".strip() if persona_description else current_context_text
     memories = await memory.get_relevant_vector_memories(
         chat_id=chat_id,
-        query_embedding=embed_text(current_context_text),
+        query_embedding=embed_text(query_text),
         top_k=top_k,
     )
     latest_reflection = await memory.get_latest_self_reflection(chat_id)
