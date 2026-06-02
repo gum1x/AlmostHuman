@@ -185,6 +185,7 @@ class BotMemory(Base):
     stances: Mapped[dict] = mapped_column(JSONB, server_default="{}")
     prompt_version: Mapped[str] = mapped_column(Text, nullable=False)
     cycle_snapshot_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    current_posture: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     __table_args__ = (
         Index("ix_bot_memory_chat_sent_at", "chat_id", sent_at.desc()),

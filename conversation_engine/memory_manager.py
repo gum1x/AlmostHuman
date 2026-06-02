@@ -133,15 +133,24 @@ class ConversationMemoryManager:
 
         try:
             distance = BotVectorMemory.embedding.cosine_distance(normalize_embedding(query_embedding))
+            similarity = (1 - distance).label("similarity")
+            # Ebbinghaus decay: recency weight = exp(-0.05 * days_since_created)
+            # Older memories decay in rank so recent context dominates.
+            days_old = func.extract(
+                "epoch", func.now() - BotVectorMemory.created_at
+            ) / 86400.0
+            decay = func.exp(-0.05 * days_old).label("decay")
+            score = ((1 - distance) * BotVectorMemory.importance_score * func.exp(-0.05 * days_old)).label("score")
             stmt: Select = (
                 select(
                     BotVectorMemory.content,
                     BotVectorMemory.memory_type,
                     BotVectorMemory.importance_score,
-                    (1 - distance).label("similarity"),
+                    similarity,
+                    score,
                 )
                 .where(BotVectorMemory.chat_id == chat_id)
-                .order_by(((1 - distance) * BotVectorMemory.importance_score).desc())
+                .order_by(score.desc())
                 .limit(top_k)
             )
             result = await self.session.execute(stmt)
@@ -211,6 +220,7 @@ class ConversationMemoryManager:
         stances: dict[str, Any],
         prompt_version: str,
         cycle_snapshot_message_id: int | None,
+        current_posture: str | None = None,
     ) -> BotMemory:
         row = BotMemory(
             chat_id=chat_id,
@@ -224,6 +234,7 @@ class ConversationMemoryManager:
             stances=stances,
             prompt_version=prompt_version,
             cycle_snapshot_message_id=cycle_snapshot_message_id,
+            current_posture=current_posture,
         )
         self.session.add(row)
         await self.session.flush()
