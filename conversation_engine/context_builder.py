@@ -206,6 +206,17 @@ def _format_local_window(enriched_messages: list[EnrichedMessage], target: Enric
     )
 
 
+def _extract_preferred_tone(notes: str | None) -> str | None:
+    """Pull 'Preferred tone: X' out of relationship notes if present."""
+    if not notes:
+        return None
+    for line in notes.splitlines():
+        stripped = line.strip()
+        if stripped.lower().startswith("preferred tone:"):
+            return stripped[len("preferred tone:"):].strip()
+    return None
+
+
 def _format_relationship_profiles(profiles: list[UserRelationshipProfile]) -> str:
     if not profiles:
         return ""
@@ -303,7 +314,8 @@ def build_request2_constraints(
         f"What has not worked: {meta.get('what_doesnt', 'unknown')}",
     ]
     for profile in relationship_profiles:
-        lines.append(f"For user_{profile.user_id} specifically: preferred_tone=unknown")
+        tone = _extract_preferred_tone(profile.notes) or "unknown"
+        lines.append(f"For user_{profile.user_id} specifically: preferred_tone={tone}")
     lines.extend(
         [
             "",
