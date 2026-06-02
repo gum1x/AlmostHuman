@@ -80,6 +80,9 @@ class EngagementGateConfig:
     velocity_window_minutes: int = 10
     thread_repeat_penalty_count: int = 2
     max_fatigue_score: float = 1.0
+    min_gate_score_to_send: float = 0.25
+    max_group_responses_per_10min: int = 3
+    same_thread_cooldown_minutes: int = 30
 
 
 @dataclass(frozen=True)
