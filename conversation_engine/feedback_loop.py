@@ -5,7 +5,7 @@ import json
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from conversation_engine.ai_client import parse_meta_reflection
 from conversation_engine.config import EngineConfig
@@ -14,6 +14,9 @@ from conversation_engine.memory_manager import ConversationMemoryManager, utcnow
 from conversation_engine.observability import record_feedback
 from conversation_engine.prompts import build_meta_reflection_prompt, build_outcome_scoring_prompt
 from storage.database import async_session_factory
+
+if TYPE_CHECKING:
+    from conversation_engine.sender import TelegramSender
 
 
 POSITIVE_EMOJIS = {"👍", "❤️", "🔥", "👏", "💯", "😂", "🤣", "✅"}
@@ -76,9 +79,10 @@ def avg_vader_sentiment(messages: list[Any]) -> float:
 
 
 class FeedbackLoop:
-    def __init__(self, config: EngineConfig, ai_client):
+    def __init__(self, config: EngineConfig, ai_client, sender: "TelegramSender | None" = None):
         self.config = config
         self.ai_client = ai_client
+        self.sender = sender
         self._queue: asyncio.Queue[tuple[int, int, int]] = asyncio.Queue()
         self._shutdown = asyncio.Event()
 
@@ -96,13 +100,30 @@ class FeedbackLoop:
     def shutdown(self) -> None:
         self._shutdown.set()
 
+    async def _fetch_reactions(self, chat_id: int, message_id: int) -> list[Reaction]:
+        """Fetch actual emoji reactions from Telegram for a sent message."""
+        if self.sender is None:
+            return []
+        try:
+            msg = await self.sender.client.get_messages(chat_id, ids=message_id)
+            if msg is None or getattr(msg, "reactions", None) is None:
+                return []
+            reactions = []
+            for rc in msg.reactions.results:
+                emoji = getattr(rc.reaction, "emoticon", None)
+                if emoji:
+                    reactions.append(Reaction(emoji=emoji, count=rc.count))
+            return reactions
+        except Exception:
+            return []
+
     async def observe_response(self, bot_memory_id: int, sent_message_id: int, chat_id: int) -> None:
         await asyncio.sleep(self.config.feedback_loop.observation_window_minutes * 60)
         async with async_session_factory() as session:
             async with session.begin():
                 memory = ConversationMemoryManager(session)
                 replies = await memory.get_replies_to(chat_id, sent_message_id)
-                reactions: list[Reaction] = []
+                reactions = await self._fetch_reactions(chat_id, sent_message_id)
                 quote_replies = [reply for reply in replies if reply.text_raw and f"{sent_message_id}" in reply.text_raw]
                 follow_up = await memory.get_messages_after(
                     chat_id,
@@ -129,12 +150,29 @@ class FeedbackLoop:
 
 def aggregate_feedback(feedback_rows: list[Any]) -> dict[str, Any]:
     by_time: dict[int, list[float]] = defaultdict(list)
+    by_outcome: dict[str, int] = defaultdict(int)
+    direct_scores: list[float] = []
+    ambient_scores: list[float] = []
+    short_scores: list[float] = []   # reply_count == 0 and reaction_count > 0
     scores = []
     for row in feedback_rows:
         scores.append(row.outcome_score)
         by_time[row.scored_at.hour].append(row.outcome_score)
+        by_outcome[row.outcome] += 1
+        # Direct = bot was explicitly replied to (reply_count > 0)
+        if row.reply_count > 0:
+            direct_scores.append(row.outcome_score)
+        else:
+            ambient_scores.append(row.outcome_score)
+        # Short = reactions only, no text replies
+        if row.reply_count == 0 and row.reaction_count > 0:
+            short_scores.append(row.outcome_score)
     return {
         "by_time_of_day": {hour: sum(values) / len(values) for hour, values in by_time.items()},
+        "by_outcome_type": dict(by_outcome),
+        "direct_avg_score": sum(direct_scores) / len(direct_scores) if direct_scores else None,
+        "ambient_avg_score": sum(ambient_scores) / len(ambient_scores) if ambient_scores else None,
+        "reaction_only_avg_score": sum(short_scores) / len(short_scores) if short_scores else None,
         "overall_trend": sum(scores) / len(scores) if scores else 0.0,
         "count": len(feedback_rows),
     }
