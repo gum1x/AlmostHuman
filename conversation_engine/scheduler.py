@@ -4,7 +4,7 @@ import asyncio
 import random
 import re
 import signal
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from conversation_engine.ai_client import (
     FakeAiClient,
@@ -108,6 +108,17 @@ _SLANG_ALIASES = {
 }
 
 _CLOSERS = {"np", "yep", "yes", "ok", "okay", "k", "thanks", "thank you", "ty", "bet"}
+
+
+def _append_context_block(context, title: str, body: str):
+    if not body.strip():
+        return context
+    return type(context)(
+        context=f"{context.context}\n\n=== {title} ===\n{body.strip()}",
+        candidate_user_ids=context.candidate_user_ids,
+        relationship_profiles=context.relationship_profiles,
+        avg_feedback_score=context.avg_feedback_score,
+    )
 
 
 def _casual_key(text: str) -> str:
@@ -566,6 +577,12 @@ class ConversationScheduler:
                     summary_prompt, summary_system = build_context_summary_prompt(context, self.config)
                     request1 = await self.ai_client.call_perception_model(summary_prompt, summary_system)
                     context_summary = parse_context_summary(request1.text)
+                    if context_summary.summary:
+                        context = _append_context_block(
+                            context,
+                            "PERCEPTION SUMMARY",
+                            context_summary.summary,
+                        )
 
                     # For the smart model decision, give it the richer self-referential context
                     # (persona + recent activity as itself + posture signals) so it can think
@@ -589,6 +606,10 @@ class ConversationScheduler:
                         posture_signals.append(f"my recent outcomes: {visible_numeric_controls['outcome_score_24h']:.2f}")
                     # Rough activity level from new messages since last snapshot
                     posture_signals.append(f"new messages since I last spoke: {new_message_count}")
+                    posture_signals.append(
+                        "current posture: "
+                        + await self._infer_social_posture(chat_id, is_private_dm, memory, brief, active_bot_thread)
+                    )
                     posture_block = " | ".join(posture_signals) if posture_signals else ""
 
                     if posture_block:
@@ -630,6 +651,16 @@ class ConversationScheduler:
                             # otherwise fall back to any sketch the smart model provided
 
                     ok, reason = validate(decision, self.config)
+                    if ok:
+                        ok, reason = await self._passes_social_safety(
+                            chat_id=chat_id,
+                            is_private_dm=is_private_dm,
+                            active_bot_thread=active_bot_thread,
+                            enriched=enriched,
+                            memory=memory,
+                            decision=decision,
+                            gate=gate,
+                        )
                     stored_decision = await memory.insert_ai_decision(
                         chat_id=chat_id,
                         prompt_version=self.config.ai.prompt_version,
@@ -759,6 +790,92 @@ class ConversationScheduler:
         if active_bot_thread and message.reply_to_message_id in (recent_bot_message_ids or set()):
             return True
         return False
+
+    async def _infer_social_posture(
+        self,
+        chat_id: int,
+        is_private_dm: bool,
+        memory: ConversationMemoryManager,
+        brief,
+        active_bot_thread: bool,
+    ) -> str:
+        if is_private_dm:
+            return "private_dm: responsive but still brief"
+        recent_outcome = await memory.get_avg_feedback_score(chat_id, window_hours=24)
+        responses_last_10min = await memory.count_bot_responses(chat_id, window_minutes=10)
+        if brief.tension_level >= self.config.engagement_gate.anti_flame_tension_threshold:
+            return "burned/quiet: tension is high"
+        if recent_outcome <= -0.25:
+            return "burned/quiet: recent replies did not land"
+        if active_bot_thread:
+            return "in_thread: direct follow-up exists"
+        if responses_last_10min >= 2:
+            return "lurking: already spoke recently"
+        if brief.tension_level <= 0.25:
+            return "lightly_vibing: available for high-signal or funny moments"
+        return "watching: selective and low-ego"
+
+    async def _passes_social_safety(
+        self,
+        chat_id: int,
+        is_private_dm: bool,
+        active_bot_thread: bool,
+        enriched,
+        memory: ConversationMemoryManager,
+        decision: ResponseDecision,
+        gate: GateResult,
+    ) -> tuple[bool, str | None]:
+        if is_private_dm:
+            return True, None
+
+        by_id = {message.message_id: message for message in enriched}
+        target_id = decision.reply_to_message_id or decision.target_message_id
+        target = by_id.get(int(target_id)) if target_id is not None else None
+        if not target:
+            return False, "target_message_not_in_recent_context"
+        if decision.reply_to_message_id is None:
+            decision.reply_to_message_id = target.message_id
+
+        recent_bot_message_ids = {
+            int(row.sent_message_id)
+            for row in await memory.get_recent_bot_memory(chat_id, limit=5)
+            if row.sent_message_id is not None
+        }
+        is_direct = self._message_is_direct(target, active_bot_thread, recent_bot_message_ids)
+        if gate.gate_score < self.config.engagement_gate.min_gate_score_to_send and not is_direct:
+            return False, f"low_social_gate:{gate.gate_score:.2f}"
+
+        responses_last_10min = await memory.count_bot_responses(chat_id, window_minutes=10)
+        if responses_last_10min >= self.config.engagement_gate.max_group_responses_per_10min and not is_direct:
+            return False, f"group_rate_limit_10min:{responses_last_10min}"
+
+        if decision.reply_to_message_id is not None:
+            recent_thread_responses = await memory.count_bot_responses_in_threads(
+                chat_id,
+                [int(decision.reply_to_message_id)],
+                self.config.engagement_gate.same_thread_cooldown_minutes,
+            )
+            if recent_thread_responses > 0 and not is_direct:
+                return False, f"same_thread_cooldown:{decision.reply_to_message_id}"
+
+        recent_bot_memory = await memory.get_recent_bot_memory(chat_id, limit=8)
+        same_user_recent = 0
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=30)
+        for row in recent_bot_memory:
+            if row.reply_to_user_id != decision.reply_to_user_id:
+                continue
+            if row.sent_at and row.sent_at >= cutoff:
+                same_user_recent += 1
+        if same_user_recent >= 2 and not is_direct:
+            return False, f"same_user_cooldown:{decision.reply_to_user_id}"
+
+        text = (decision.response_text or "").strip()
+        if text and recent_bot_memory:
+            last_text = (recent_bot_memory[0].response_text or "").strip().lower()
+            if last_text and text.lower() == last_text:
+                return False, "duplicate_recent_reply"
+
+        return True, None
 
     async def _send_local_reply(
         self,
