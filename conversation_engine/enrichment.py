@@ -15,6 +15,45 @@ except ImportError:  # pragma: no cover
 
 _ANALYZER = SentimentIntensityAnalyzer() if SentimentIntensityAnalyzer else None
 
+# Group-specific sentiment overrides. VADER misses these entirely because it
+# was trained on generic social media. These scores are (-1 to +1) and are
+# averaged with VADER's score when the term appears in the text.
+_GROUP_SENTIMENT_OVERRIDES: dict[str, float] = {
+    # Dismissive / calling out
+    "larp": -0.5,
+    "larping": -0.5,
+    "larper": -0.5,
+    "mid": -0.35,
+    "cope": -0.4,
+    "coping": -0.4,
+    "scam": -0.7,
+    "scammer": -0.75,
+    "pipe down": -0.45,
+    "shut up": -0.5,
+    "fuck off": -0.65,
+    "dumbass": -0.5,
+    "dumb fuck": -0.6,
+    "stupid": -0.45,
+    # Transaction/trust distrust
+    "reported": -0.4,
+    "ban": -0.4,
+    "blocked": -0.35,
+    # Positive/hype
+    "vouch": 0.45,
+    "vouched": 0.45,
+    "w": 0.3,           # single W as win signal (context-dependent but net positive)
+    "based": 0.4,
+    "goat": 0.5,
+    "legit": 0.4,
+    "sold": 0.2,        # completed sale = mildly positive
+    # Neutral reactions that look negative to VADER
+    "nah": 0.0,
+    "nope": 0.0,
+    "bet": 0.1,
+    "fr": 0.0,
+    "lowl": 0.0,        # typo of "lol"
+}
+
 
 @dataclass(frozen=True)
 class EnrichedMessage:
@@ -54,17 +93,38 @@ class Brief:
         }
 
 
+def _group_override_score(text: str) -> tuple[float, int]:
+    """Return (sum_of_matched_scores, match_count) for group-specific terms."""
+    lowered = text.lower()
+    total = 0.0
+    count = 0
+    for term, score in _GROUP_SENTIMENT_OVERRIDES.items():
+        if term in lowered:
+            total += score
+            count += 1
+    return total, count
+
+
 def sentiment_score(text: str) -> float:
     if not text:
         return 0.0
+    override_sum, override_count = _group_override_score(text)
     if _ANALYZER:
-        return float(_ANALYZER.polarity_scores(text)["compound"])
+        vader_score = float(_ANALYZER.polarity_scores(text)["compound"])
+        if override_count > 0:
+            # Blend VADER and group-specific overrides; give overrides equal weight
+            override_avg = max(-1.0, min(1.0, override_sum / override_count))
+            return max(-1.0, min(1.0, (vader_score + override_avg) / 2.0))
+        return vader_score
+    # Fallback without VADER
     lowered = text.lower()
     negative = sum(token in lowered for token in ("bad", "hate", "scam", "wrong", "terrible"))
     positive = sum(token in lowered for token in ("good", "great", "love", "nice", "useful"))
-    if negative == positive:
-        return 0.0
-    return max(-1.0, min(1.0, (positive - negative) / 3.0))
+    base = 0.0 if negative == positive else max(-1.0, min(1.0, (positive - negative) / 3.0))
+    if override_count > 0:
+        override_avg = max(-1.0, min(1.0, override_sum / override_count))
+        return max(-1.0, min(1.0, (base + override_avg) / 2.0))
+    return base
 
 
 def enrich_messages(messages: list[Message], prompt_config: PromptConfig) -> list[EnrichedMessage]:
