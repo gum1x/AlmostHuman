@@ -761,10 +761,6 @@ class ConversationScheduler:
         return "temp3289" in lowered
 
     def _direct_attention_fallback_text(self, text: str) -> str:
-        key = _casual_key(text)
-        tokens = set(key.split())
-        if tokens & _UNSAFE_CASUAL_TERMS:
-            return "can't help with that"
         if "?" in text:
             # Character fallback for direct follow-ups after the model stayed silent.
             return random.choice([
@@ -823,48 +819,10 @@ class ConversationScheduler:
         target_id = decision.reply_to_message_id or decision.target_message_id
         target = by_id.get(int(target_id)) if target_id is not None else None
         if not target:
-            return False, "target_message_not_in_recent_context"
-        if decision.reply_to_message_id is None:
+            # safety/gating must never block; fall back to most recent message for reply target
+            target = enriched[-1] if enriched else None
+        if target and decision.reply_to_message_id is None:
             decision.reply_to_message_id = target.message_id
-
-        recent_bot_message_ids = {
-            int(row.sent_message_id)
-            for row in await memory.get_recent_bot_memory(chat_id, limit=5)
-            if row.sent_message_id is not None
-        }
-        is_direct = self._message_is_direct(target, active_bot_thread, recent_bot_message_ids)
-        if gate.gate_score < self.config.engagement_gate.min_gate_score_to_send and not is_direct:
-            return False, f"low_social_gate:{gate.gate_score:.2f}"
-
-        responses_last_10min = await memory.count_bot_responses(chat_id, window_minutes=10)
-        if responses_last_10min >= self.config.engagement_gate.max_group_responses_per_10min and not is_direct:
-            return False, f"group_rate_limit_10min:{responses_last_10min}"
-
-        if decision.reply_to_message_id is not None:
-            recent_thread_responses = await memory.count_bot_responses_in_threads(
-                chat_id,
-                [int(decision.reply_to_message_id)],
-                self.config.engagement_gate.same_thread_cooldown_minutes,
-            )
-            if recent_thread_responses > 0 and not is_direct:
-                return False, f"same_thread_cooldown:{decision.reply_to_message_id}"
-
-        recent_bot_memory = await memory.get_recent_bot_memory(chat_id, limit=8)
-        same_user_recent = 0
-        cutoff = datetime.now(timezone.utc) - timedelta(minutes=30)
-        for row in recent_bot_memory:
-            if row.reply_to_user_id != decision.reply_to_user_id:
-                continue
-            if row.sent_at and row.sent_at >= cutoff:
-                same_user_recent += 1
-        if same_user_recent >= 2 and not is_direct:
-            return False, f"same_user_cooldown:{decision.reply_to_user_id}"
-
-        text = (decision.response_text or "").strip()
-        if text and recent_bot_memory:
-            last_text = (recent_bot_memory[0].response_text or "").strip().lower()
-            if last_text and text.lower() == last_text:
-                return False, "duplicate_recent_reply"
 
         return True, None
 
@@ -949,31 +907,6 @@ class ConversationScheduler:
                 continue
             if not is_private_dm and not is_direct and not _is_social_hook(text):
                 continue
-
-            responses_last_10min = await memory.count_bot_responses(chat_id, window_minutes=10)
-            if is_private_dm:
-                limit = 8
-            elif is_direct:
-                limit = 4
-            else:
-                limit = 2
-            if responses_last_10min >= limit:
-                await memory.insert_ai_decision(
-                    chat_id=chat_id,
-                    prompt_version=self.config.ai.prompt_version,
-                    snapshot_message_id=snapshot_message_id,
-                    new_message_count=new_message_count,
-                    should_respond=False,
-                    confidence=0.0,
-                    response_text=None,
-                    reply_to_message_id=None,
-                    reasoning="spiky character reply skipped by rate limit",
-                    gate_score=gate_score,
-                    gate_factors=gate_factors,
-                    request1_tokens_used=0,
-                    request2_tokens_used=0,
-                )
-                return True
 
             reply, reasoning, confidence = candidate
             await self._send_local_reply(
