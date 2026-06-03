@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Hosted on VPS • Research</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=Space+Grotesk:wght@500;600&amp;display=swap');
+    
+    :root {
+      --font-sans: 'Inter', system_ui, sans-serif;
+    }
+    
+    body {
+      font-family: var(--font-sans);
+    }
+    
+    .title-font {
+      font-family: 'Space Grotesk', var(--font-sans);
+    }
+
+    .glass {
+      background: rgba(255,255,255, 0.08);
+      backdrop-filter: blur(20px);
+    }
+
+    .mac-window {
+      box-shadow: 0 25px 50px -12px rgb(0 0 0 / 0.4);
+    }
+
+    .status-dot {
+      animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+    }
+
+    .section-header {
+      font-size: 0.75rem;
+      letter-spacing: 0.5px;
+    }
+  </style>
+</head>
+<body class="bg-zinc-950 text-zinc-200">
+  <div class="max-w-5xl mx-auto px-6 py-12">
+    <!-- Header -->
+    <div class="flex items-center justify-between mb-12">
+      <div class="flex items-center gap-x-3">
+        <div class="w-9 h-9 bg-emerald-500 rounded-2xl flex items-center justify-center">
+          <i class="fa-solid fa-laptop-code text-white text-xl"></i>
+        </div>
+        <div>
+          <div class="text-2xl font-semibold tracking-tighter title-font">Hosted from Mac</div>
+          <div class="text-xs text-zinc-500 -mt-0.5">Workstation • <LAN_IP></div>
+        </div>
+      </div>
+      
+      <div class="flex items-center gap-x-2 px-3 py-1.5 bg-zinc-900 border border-zinc-800 rounded-3xl text-xs">
+        <div class="flex items-center gap-x-1.5">
+          <div class="w-2 h-2 bg-emerald-400 rounded-full status-dot"></div>
+          <span class="font-medium text-emerald-400">Online</span>
+        </div>
+        <div class="text-zinc-600">•</div>
+        <div class="text-zinc-400">macOS 15.1.1</div>
+      </div>
+    </div>
+
+    <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+      
+      <!-- Main Hero -->
+      <div class="lg:col-span-7">
+        <div class="mac-window bg-zinc-900 border border-zinc-800 rounded-3xl p-8">
+          <div class="flex items-center gap-x-2 mb-6">
+            <div class="px-3 py-1 text-xs font-medium bg-zinc-800 text-zinc-400 rounded-2xl flex items-center gap-x-1.5">
+              <i class="fa-solid fa-globe fa-sm"></i>
+              <span>Public via Tunnel</span>
+            </div>
+            <div class="text-xs px-2.5 py-1 bg-emerald-500/10 text-emerald-400 rounded-2xl flex items-center gap-x-1">
+              <i class="fa-solid fa-check"></i>
+              <span class="font-medium">Live</span>
+            </div>
+          </div>
+
+          <h1 class="text-5xl tracking-tighter font-semibold title-font leading-none mb-4">
+            This website is<br>running on my Mac.
+          </h1>
+          <p class="text-lg text-zinc-400 max-w-md">
+            Served directly from this machine using Python + Docker. 
+            No VPS required for development and small projects.
+          </p>
+
+          <div class="mt-8 flex items-center gap-x-3">
+            <a href="#how" 
+               class="inline-flex items-center justify-center gap-x-2 px-5 py-2.5 text-sm font-medium bg-white text-black rounded-3xl hover:bg-zinc-100 active:bg-zinc-200 transition-colors">
+              <span>How this works</span>
+            </a>
+            <a href="https://github.com" target="_blank"
+               class="inline-flex items-center justify-center gap-x-2 px-5 py-2.5 text-sm font-medium border border-zinc-700 hover:bg-zinc-900 rounded-3xl transition-colors">
+              <i class="fa-brands fa-github"></i>
+              <span>View source</span>
+            </a>
+          </div>
+        </div>
+      </div>
+
+      <!-- Status Cards -->
+      <div class="lg:col-span-5 space-y-3">
+        <div class="bg-zinc-900 border border-zinc-800 rounded-3xl p-5">
+          <div class="flex justify-between items-start">
+            <div>
+              <div class="section-header font-medium text-zinc-400 tracking-widest">LOCAL IP</div>
+              <div class="font-mono text-2xl font-semibold mt-1 tracking-tighter"><LAN_IP></div>
+            </div>
+            <i class="fa-solid fa-wifi text-2xl text-zinc-600 mt-1"></i>
+          </div>
+          <div class="text-xs text-emerald-400 mt-3 flex items-center gap-x-1">
+            <i class="fa-solid fa-check-circle"></i>
+            <span>Accessible on local network</span>
+          </div>
+        </div>
+
+        <div class="bg-zinc-900 border border-zinc-800 rounded-3xl p-5">
+          <div class="flex justify-between items-start">
+            <div>
+              <div class="section-header font-medium text-zinc-400 tracking-widest">TAILSCALE</div>
+              <div class="font-mono text-2xl font-semibold mt-1 tracking-tighter"><TAILSCALE_IP></div>
+            </div>
+            <i class="fa-solid fa-shield-halved text-2xl text-emerald-400 mt-1"></i>
+          </div>
+          <div class="text-xs text-emerald-400 mt-3">Secure access from anywhere (VPN)</div>
+        </div>
+      </div>
+
+      <!-- API Status -->
+      <div class="lg:col-span-12">
+        <div class="bg-zinc-900 border border-zinc-800 rounded-3xl p-6">
+          <div class="flex items-center justify-between mb-4">
+            <div>
+              <div class="font-semibold">Connected to Telegram CI API</div>
+              <div class="text-xs text-zinc-500">http://localhost:8000 (when Docker is running)</div>
+            </div>
+            <div id="api-status" 
+                 class="px-3 py-1 text-xs rounded-2xl flex items-center gap-x-2 bg-zinc-800 text-zinc-400">
+              <div class="w-1.5 h-1.5 bg-zinc-400 rounded-full"></div>
+              <span>Checking...</span>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
+            <div class="bg-zinc-950 border border-zinc-800 p-3 rounded-2xl">
+              <div class="text-xs text-zinc-400">Health endpoint</div>
+              <button onclick="checkHealth()" 
+                      class="mt-1 text-emerald-400 hover:text-emerald-300 flex items-center gap-x-1.5 text-xs font-medium">
+                <i class="fa-solid fa-sync fa-sm"></i>
+                <span>Check /health</span>
+              </button>
+            </div>
+            
+            <div class="bg-zinc-950 border border-zinc-800 p-3 rounded-2xl">
+              <div class="text-xs text-zinc-400">Messages API</div>
+              <div class="text-xs mt-1 text-zinc-500">/messages/{chat_id}</div>
+            </div>
+
+            <div class="bg-zinc-950 border border-zinc-800 p-3 rounded-2xl flex items-center">
+              <div class="text-xs">
+                <span class="text-zinc-400">This site can fetch live data from your bot's database.</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- How it works -->
+    <div id="how" class="mt-12 pt-8 border-t border-zinc-800">
+      <h2 class="font-semibold text-xl mb-2">How to host your own site from this Mac</h2>
+      
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mt-6">
+        <div class="border border-zinc-800 rounded-3xl p-5">
+          <div class="text-emerald-400 text-xs font-medium">STEP 1</div>
+          <div class="mt-1 font-medium">Run a server</div>
+          <pre class="mt-3 bg-black/40 text-[10px] p-3 rounded-2xl overflow-auto text-zinc-400"><code>python3 -m http.server 8080
+# or with Docker:
+docker run -p 8080:80 -v $(pwd):/usr/share/nginx/html nginx</code></pre>
+        </div>
+        
+        <div class="border border-zinc-800 rounded-3xl p-5">
+          <div class="text-emerald-400 text-xs font-medium">STEP 2</div>
+          <div class="mt-1 font-medium">Expose it</div>
+          <div class="text-sm text-zinc-400 mt-2">Use one of these:</div>
+          <ul class="mt-3 space-y-2 text-xs">
+            <li class="flex gap-2"><i class="fa-solid fa-arrow-right text-emerald-400 mt-0.5"></i> <span><strong>ngrok</strong> (easiest)</span></li>
+            <li class="flex gap-2"><i class="fa-solid fa-arrow-right text-emerald-400 mt-0.5"></i> <span><strong>cloudflared tunnel</strong></span></li>
+            <li class="flex gap-2"><i class="fa-solid fa-arrow-right text-emerald-400 mt-0.5"></i> <span><strong>Tailscale</strong> (you already use it)</span></li>
+          </ul>
+        </div>
+
+        <div class="border border-zinc-800 rounded-3xl p-5">
+          <div class="text-emerald-400 text-xs font-medium">PRO TIP</div>
+          <div class="text-sm mt-1 leading-snug text-zinc-400">
+            Keep your Mac from sleeping with:
+            <pre class="mt-2 text-xs bg-black/30 p-2 rounded">caffeinate -s</pre>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="text-center mt-12 text-xs text-zinc-500">
+      Served live from this machine • 
+      <span class="font-mono">~/Research/web</span>
+    </div>
+  </div>
+
+  <script>
+    // Tailwind script
+    function initializeTailwind() {
+      document.documentElement.style.setProperty('--accent', '#10b981');
+    }
+    
+    async function checkHealth() {
+      const statusEl = document.getElementById('api-status');
+      statusEl.innerHTML = `<div class="w-1.5 h-1.5 bg-amber-400 rounded-full animate-pulse"></div><span>Checking...</span>`;
+      
+      try {
+        const res = await fetch('http://localhost:8000/health');
+        if (res.ok) {
+          const data = await res.json();
+          statusEl.innerHTML = `
+            <div class="w-1.5 h-1.5 bg-emerald-400 rounded-full"></div>
+            <span class="text-emerald-400">API healthy (${data.status})</span>
+          `;
+        } else {
+          throw new Error('Not OK');
+        }
+      } catch (e) {
+        statusEl.innerHTML = `
+          <div class="w-1.5 h-1.5 bg-red-400 rounded-full"></div>
+          <span class="text-red-400">API not running</span>
+        `;
+      }
+    }
+    
+    // Auto check health on load
+    window.onload = function() {
+      initializeTailwind();
+      // Try health check after a moment
+      setTimeout(() => {
+        const statusEl = document.getElementById('api-status');
+        if (statusEl) checkHealth();
+      }, 800);
+    }
+    
+    // Keyboard hint
+    document.addEventListener('keydown', function(e) {
+      if (e.key === "/" && document.activeElement.tagName === "BODY") {
+        e.preventDefault();
+        const btn = document.querySelector('button[onclick*="checkHealth"]');
+        if (btn) btn.click();
+      }
+    });
+  </script>
+</body>
