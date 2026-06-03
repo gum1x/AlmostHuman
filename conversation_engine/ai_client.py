@@ -22,9 +22,18 @@ class PerceptionDecision(BaseModel):
     annoying_reason: str = ""
 
 
+class AnalyzedSignals(BaseModel):
+    """Quantitative signals the AI model analyzes from context before deciding."""
+    direct_address_score: float = 0.0  # 0-1: how directly is the bot being addressed
+    social_debt: float = 0.0  # 0-1: obligation to respond (unanswered question, active thread, etc.)
+    candidate_value_score: int = 0  # 0-100: how valuable is responding to this moment
+    persona_relevance: float = 0.0  # 0-1: how relevant is this to the character's interests/expertise
+
+
 class ResponseDecision(BaseModel):
     should_respond: bool = False
     confidence: float = 0.0
+    signals: AnalyzedSignals = Field(default_factory=AnalyzedSignals)  # AI-analyzed quantitative signals
     response_text: str | None = None
     reply_to_message_id: int | None = None
     reply_to_user_id: int | None = None
@@ -214,6 +223,12 @@ class FakeAiClient:
         return AiCallResult(
             text=json.dumps(
                 {
+                    "signals": {
+                        "direct_address_score": 0.0,
+                        "social_debt": 0.0,
+                        "candidate_value_score": 0,
+                        "persona_relevance": 0.0,
+                    },
                     "should_respond": False,
                     "confidence": 0.0,
                     "response_text": None,
@@ -281,6 +296,21 @@ def parse_response_decision(text: str) -> ResponseDecision:
         payload["stances"] = {}
     if not isinstance(payload.get("updated_engagement_posture"), str | type(None)):
         payload["updated_engagement_posture"] = None
+    # Coerce signals sub-object
+    if not isinstance(payload.get("signals"), dict):
+        payload["signals"] = {}
+    signals = payload["signals"]
+    for float_key in ("direct_address_score", "social_debt", "persona_relevance"):
+        if float_key in signals:
+            try:
+                signals[float_key] = max(0.0, min(1.0, float(signals[float_key])))
+            except (ValueError, TypeError):
+                signals[float_key] = 0.0
+    if "candidate_value_score" in signals:
+        try:
+            signals["candidate_value_score"] = max(0, min(100, int(signals["candidate_value_score"])))
+        except (ValueError, TypeError):
+            signals["candidate_value_score"] = 0
     return ResponseDecision.model_validate(payload)
 
 
