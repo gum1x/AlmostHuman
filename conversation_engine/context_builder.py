@@ -237,6 +237,79 @@ def _add_optional_section(lines: list[str], title: str, value: str) -> None:
         lines.extend([title, value.strip()])
 
 
+def compute_quantitative_signals(
+    enriched_messages: list[EnrichedMessage],
+    brief: Brief,
+    bot_user_id: int | None = None,
+    bot_sent_message_ids: set[int] | None = None,
+    time_since_last_bot_msg_min: float | None = None,
+    chat_velocity: float | None = None,
+    responses_last_hour: int = 0,
+    avg_feedback_score: float = 0.0,
+) -> dict[str, str | float | int | bool]:
+    """Compute quantitative signals from enriched messages and available state.
+
+    Some signals are pre-computed here (from message data), others will be
+    inferred by the AI model from conversation context.
+    """
+    bot_ids = bot_sent_message_ids or set()
+    recent = enriched_messages[-20:]
+    target = select_target_message(enriched_messages)
+
+    # --- is_reply_to_bot: target message is a direct reply to something we said ---
+    is_reply_to_bot = False
+    if target and target.reply_to_message_id is not None:
+        is_reply_to_bot = target.reply_to_message_id in bot_ids
+
+    # --- chat_velocity: messages per minute (pre-computed or estimated) ---
+    if chat_velocity is None:
+        # Rough estimate from timestamp spread of recent messages
+        if len(recent) >= 2 and recent[0].timestamp and recent[-1].timestamp:
+            span = (recent[-1].timestamp - recent[0].timestamp).total_seconds()
+            chat_velocity = round(len(recent) / max(1, span / 60), 2)
+        else:
+            chat_velocity = 0.0
+
+    # --- emotional_intensity: max absolute sentiment in recent window ---
+    sentiments = [abs(m.sentiment_score) for m in recent]
+    emotional_intensity = round(max(sentiments) if sentiments else 0.0, 2)
+
+    # --- unresolved_questions: messages ending in ? with no reply in the window ---
+    replied_to_ids = {m.reply_to_message_id for m in enriched_messages if m.reply_to_message_id}
+    unresolved = sum(
+        1 for m in recent
+        if m.text.rstrip().endswith("?") and m.message_id not in replied_to_ids
+    )
+
+    # --- direct_address_score: heuristic from target ---
+    # Full score computed by AI, but we provide a base from structural signals
+    direct_score = 0.0
+    if is_reply_to_bot:
+        direct_score = 0.9
+    elif target and bot_user_id and str(bot_user_id) in (target.text or ""):
+        direct_score = 0.8
+
+    return {
+        "is_reply_to_bot": is_reply_to_bot,
+        "chat_velocity": chat_velocity,
+        "time_since_last_bot_msg_min": round(time_since_last_bot_msg_min, 1) if time_since_last_bot_msg_min is not None else -1,
+        "emotional_intensity": emotional_intensity,
+        "unresolved_questions": unresolved,
+        "direct_address_score_base": round(direct_score, 2),
+        "tension": round(brief.tension_level, 2),
+        "avg_feedback_24h": round(avg_feedback_score, 2),
+        "responses_last_hour": responses_last_hour,
+    }
+
+
+def format_quantitative_signals(signals: dict[str, str | float | int | bool]) -> str:
+    """Format pre-computed signals as a compact block for the context."""
+    lines = []
+    for key, val in signals.items():
+        lines.append(f"{key}={val}")
+    return " | ".join(lines)
+
+
 async def build_context(
     chat_id: int,
     enriched_messages: list[EnrichedMessage],
