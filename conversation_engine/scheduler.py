@@ -573,31 +573,45 @@ class ConversationScheduler:
                         avg_feedback_score=context.avg_feedback_score,
                     )
 
-                    # Lightweight "my current engagement signals" for the character to read as its posture.
-                    # This helps the smart model have an internal sense of its own rhythm/energy
-                    # so it naturally selects when to speak vs stay quiet.
-                    posture_signals = []
-                    if brief and brief.tension_level is not None:
-                        posture_signals.append(f"tension in room: {brief.tension_level:.1f}")
-                    if visible_numeric_controls.get("outcome_score_24h") is not None:
-                        posture_signals.append(f"my recent outcomes: {visible_numeric_controls['outcome_score_24h']:.2f}")
-                    # Rough activity level from new messages since last snapshot
-                    posture_signals.append(f"new messages since I last spoke: {new_message_count}")
-                    posture_signals.append(
-                        "current posture: "
-                        + await self._infer_social_posture(chat_id, is_private_dm, memory, brief, active_bot_thread)
-                    )
-                    posture_block = " | ".join(posture_signals) if posture_signals else ""
+                    # === PRE-COMPUTED QUANTITATIVE SIGNALS ===
+                    # These are hard facts from DB/state that the decision model reads directly.
+                    # The model will then infer additional signals (social_debt, persona_relevance, etc.)
+                    # from the conversation context before making its final decision.
+                    responses_last_hour = await memory.count_bot_responses(chat_id, window_minutes=60)
+                    bot_sent_ids = {
+                        bm.sent_message_id for bm in recent_bot_mem
+                        if bm.sent_message_id is not None
+                    }
+                    time_since_last_bot: float | None = None
+                    if recent_bot_mem:
+                        latest_bot_ts = getattr(recent_bot_mem[0], "created_at", None)
+                        if latest_bot_ts:
+                            time_since_last_bot = (datetime.now(timezone.utc) - latest_bot_ts).total_seconds() / 60.0
 
-                    if posture_block:
-                        # Append as part of the character's self-view for this decision
-                        enriched_for_decision = f"{context.context}\n\n=== MY CURRENT ENGAGEMENT SIGNALS ===\n{posture_block}"
-                        decision_context = type(context)(
-                            context=enriched_for_decision,
-                            candidate_user_ids=context.candidate_user_ids,
-                            relationship_profiles=context.relationship_profiles,
-                            avg_feedback_score=context.avg_feedback_score,
-                        )
+                    quant_signals = compute_quantitative_signals(
+                        enriched_messages=enriched,
+                        brief=brief,
+                        bot_user_id=self.bot_user_id,
+                        bot_sent_message_ids=bot_sent_ids,
+                        time_since_last_bot_msg_min=time_since_last_bot,
+                        chat_velocity=new_message_count / max(1, self.config.engagement_gate.velocity_window_minutes),
+                        responses_last_hour=responses_last_hour,
+                        avg_feedback_score=outcome_score_24h,
+                    )
+                    posture = await self._infer_social_posture(chat_id, is_private_dm, memory, brief, active_bot_thread)
+                    signals_block = format_quantitative_signals(quant_signals)
+
+                    enriched_for_decision = (
+                        f"{context.context}\n\n"
+                        f"=== PRE-COMPUTED SIGNALS ===\n{signals_block}\n"
+                        f"current_posture={posture}"
+                    )
+                    decision_context = type(context)(
+                        context=enriched_for_decision,
+                        candidate_user_ids=context.candidate_user_ids,
+                        relationship_profiles=context.relationship_profiles,
+                        avg_feedback_score=context.avg_feedback_score,
+                    )
 
                     # === HYBRID ARCHITECTURE ===
                     # Smart model = the actual participant character (rich constructed personality).
