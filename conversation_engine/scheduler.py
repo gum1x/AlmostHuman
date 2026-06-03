@@ -505,23 +505,6 @@ class ConversationScheduler:
                         tension=brief.tension_level,
                     )
 
-                    if not gate.should_proceed:
-                        await memory.insert_ai_decision(
-                            chat_id=chat_id,
-                            prompt_version=self.config.ai.prompt_version,
-                            snapshot_message_id=snapshot_message_id,
-                            new_message_count=new_message_count,
-                            should_respond=False,
-                            confidence=0.0,
-                            response_text=None,
-                            reply_to_message_id=None,
-                            reasoning=f"hard safety gate blocked: {gate.gate_factors.get('blocked', 'unknown')}",
-                            gate_score=gate.gate_score,
-                            gate_factors=visible_numeric_controls,
-                        )
-                        await memory.record_cycle_success(chat_id)
-                        return self.config.scheduler.initial_interval_seconds
-
                     persona_memories, latest_reflection = await get_relevant_persona_vectors(
                         chat_id,
                         current_context_text(enriched),
