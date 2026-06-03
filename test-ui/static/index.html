@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Conversation Engine - Test UI</title>
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<div id="app">
+  <!-- Sidebar: Chat list -->
+  <aside id="sidebar">
+    <div class="sidebar-header">
+      <h2>Test Chats</h2>
+      <div id="drop-zone" class="drop-zone">
+        <span class="drop-icon">+</span>
+        <span>Drop JSON files here</span>
+        <input type="file" id="file-input" accept=".json" multiple hidden>
+      </div>
+    </div>
+    <ul id="chat-list"></ul>
+  </aside>
+
+  <!-- Main area -->
+  <main id="main">
+    <div id="empty-state">
+      <h1>Conversation Engine Test UI</h1>
+      <p>Drag & drop JSON chat files into the sidebar to begin testing.</p>
+      <p class="hint">Click any chat to view it. Click "Run Pipeline" to process it through the full workflow.</p>
+      <div class="json-format">
+        <h3>Expected JSON format:</h3>
+        <pre>[
+  {
+    "message_id": 1,
+    "chat_id": -1001234567890,
+    "sender_id": 12345,
+    "text": "yo anyone selling premium?",
+    "reply_to_message_id": null,
+    "timestamp": "2026-06-01T12:00:00Z"
+  },
+  ...
+]</pre>
+      </div>
+    </div>
+
+    <!-- Chat view -->
+    <div id="chat-view" class="hidden">
+      <div class="chat-header">
+        <h2 id="chat-title"></h2>
+        <div class="chat-actions">
+          <button id="btn-run" class="btn btn-primary" title="Run through full pipeline">Run Pipeline</button>
+          <button id="btn-delete" class="btn btn-danger" title="Remove this chat">Delete</button>
+        </div>
+      </div>
+
+      <div id="chat-container">
+        <!-- Messages column -->
+        <div id="messages-panel">
+          <div id="messages"></div>
+          <div id="input-area">
+            <input type="text" id="msg-input" placeholder="Type a message as the test user..." autocomplete="off">
+            <button id="btn-send" class="btn btn-primary">Send</button>
+          </div>
+        </div>
+
+        <!-- Pipeline panel -->
+        <div id="pipeline-panel">
+          <h3>Pipeline Steps</h3>
+          <div id="pipeline-steps"></div>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

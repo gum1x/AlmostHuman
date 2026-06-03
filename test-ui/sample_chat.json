@@ -1,0 +1,58 @@
+[
+  {
+    "message_id": 1,
+    "chat_id": -1001234567890,
+    "sender_id": 11111,
+    "text": "yo anyone got premium handles for sale",
+    "reply_to_message_id": null,
+    "timestamp": "2026-06-01T12:00:00Z"
+  },
+  {
+    "message_id": 2,
+    "chat_id": -1001234567890,
+    "sender_id": 22222,
+    "text": "i got @darknight for 200 usdt",
+    "reply_to_message_id": 1,
+    "timestamp": "2026-06-01T12:01:00Z"
+  },
+  {
+    "message_id": 3,
+    "chat_id": -1001234567890,
+    "sender_id": 33333,
+    "text": "lmao thats mid bro nobody paying 200 for that",
+    "reply_to_message_id": 2,
+    "timestamp": "2026-06-01T12:01:30Z"
+  },
+  {
+    "message_id": 4,
+    "chat_id": -1001234567890,
+    "sender_id": 11111,
+    "text": "is that even legit tho? use @Protect or get a MM",
+    "reply_to_message_id": 2,
+    "timestamp": "2026-06-01T12:02:00Z"
+  },
+  {
+    "message_id": 5,
+    "chat_id": -1001234567890,
+    "sender_id": 22222,
+    "text": "its legit bro i sold 3 handles this week vouch me",
+    "reply_to_message_id": 4,
+    "timestamp": "2026-06-01T12:02:30Z"
+  },
+  {
+    "message_id": 6,
+    "chat_id": -1001234567890,
+    "sender_id": 44444,
+    "text": "classic larp everyone says they sold 3 handles",
+    "reply_to_message_id": 5,
+    "timestamp": "2026-06-01T12:03:00Z"
+  },
+  {
+    "message_id": 7,
+    "chat_id": -1001234567890,
+    "sender_id": 33333,
+    "text": "fr fr someone show proof or this is dead",
+    "reply_to_message_id": null,
+    "timestamp": "2026-06-01T12:03:30Z"
+  }
+]
