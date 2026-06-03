@@ -4,7 +4,7 @@ import asyncio
 import random
 import re
 import signal
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from conversation_engine.ai_client import (
     FakeAiClient,
@@ -19,6 +19,8 @@ from conversation_engine.config import EngineConfig, load_engine_config
 from conversation_engine.context_builder import (
     build_response_context,
     build_context,
+    compute_quantitative_signals,
+    format_quantitative_signals,
 )
 from conversation_engine.engagement_gate import GateResult, compute_gate_score
 from conversation_engine.enrichment import build_brief, current_context_text, enrich_messages
