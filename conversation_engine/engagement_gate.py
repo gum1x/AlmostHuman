@@ -60,20 +60,6 @@ async def compute_gate_score(
     tension = brief.tension_level if brief else 0.0
     factors["emotional_trend"] = max(0.0, (sentiment_trend + 1.0) / 2.0) * (1.0 - tension)
 
-    if tension > gate_config.anti_flame_tension_threshold:
-        active_direct = any(
-            thread.status == "active_direct_reply_to_bot" and thread.urgency == "high"
-            for thread in (brief.active_threads if brief else [])
-        )
-        if not active_direct:
-            result = GateResult(
-                gate_score=0.0,
-                gate_factors={"blocked": "anti_flame_protection"},
-                should_proceed=False,
-            )
-            record_gate(result.gate_score, {})
-            return result
-
     responses_last_hour = await memory.count_bot_responses(chat_id, window_minutes=60)
     responses_last_10min = await memory.count_bot_responses(chat_id, window_minutes=10)
     fatigue = min(
