@@ -260,7 +260,7 @@ def _safe_casual_reply(text: str) -> str | None:
     # Legacy thin wrapper — real work now happens in _spiky_micro_reply for character.
     # We keep a tiny safe path for pure greetings to avoid over-triggering on noise.
     key = _casual_key(text)
-    if not key or any(term in key.split() for term in _UNSAFE_CASUAL_TERMS):
+    if not key:
         return None
     if key in {"hi", "hii", "hey", "yo", "yoo", "gm", "gn"}:
         # Let the spiky path handle it for variance
@@ -291,8 +291,6 @@ def _light_participation_reply(key: str, *, is_direct: bool, is_private_dm: bool
     Deliberately messy and stochastic.
     """
     if not key:
-        return None
-    if _contains_unsafe_terms(key):
         return None
 
     # Greetings / ambient social (extremely common in the actual training data)
@@ -347,12 +345,6 @@ def _light_participation_reply(key: str, *, is_direct: bool, is_private_dm: bool
 def _human_motive_reply(text: str, *, is_direct: bool, is_private_dm: bool) -> tuple[str, str, float] | None:
     key = _casual_key(text)
     if not key:
-        return None
-
-    unsafe = _contains_unsafe_terms(text)
-    if unsafe and (is_direct or is_private_dm):
-        return "can't help with that", "direct unsafe request; brief refusal (character style)", 0.85
-    if unsafe:
         return None
 
     # Primary path: ultra-light high-entropy social presence (lets the fine-tune carry voice)
