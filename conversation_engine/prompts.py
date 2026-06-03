@@ -114,28 +114,46 @@ def build_decide_and_draft_prompt(
     config: EngineConfig,
     constraints: str | None = None,
 ) -> tuple[str, str]:
-    # The smart model is now the actual participant character (see SMART_PARTICIPANT_SYSTEM).
-    # It decides as itself, with its own history, shifting energy, and current posture.
-    # The local fine-tuned model remains a pure dumb voice renderer that only receives
-    # the minimal intent + tiny context. Do not leak rich personality or full state to it.
     prompt = f"""
 {context.context}
 
-You are the character described in your system prompt. You are *in* this chat with your own recent activity as yourself, your current engagement posture, your memories of these people, and your shifting energy (sometimes playful/chaotic, sometimes spiky, sometimes low-investment).
+You are the character described in your system prompt. New messages arrived. Three-step process:
 
-New messages just arrived. As *this specific person*, decide naturally what (if anything) you actually feel like doing or saying right now.
+=== STEP 1: READ PRE-COMPUTED SIGNALS ===
+The system has already computed these from the database and message history. They are in the context above under "=== PRE-COMPUTED SIGNALS ===". Use them as hard facts — do not re-estimate them.
+Key signals: is_reply_to_bot, chat_velocity, time_since_last_bot_msg_min, emotional_intensity, unresolved_questions, direct_address_score_base, tension, avg_feedback_24h, responses_last_hour.
 
-Return one JSON object. Key guidance:
-- "plan": the *rough* meaning, angle, or contribution you want to get across as this character (e.g. "dryly call out the larp on the Fragment thing", "acknowledge the pattern and add the incentive angle", "just jump on the absurd energy for the lulz", "light shitpost on how mid this is"). This is the clean handoff the local fine-tuned voice model will turn into the actual words and rhythm we would use in the chat. Keep it high-level and natural — do NOT try to write the final text or get too specific on wording. The local model owns the low-level phrasing.
-- "reasoning": your actual internal thought as the character — why this does or doesn't feel like your moment, given your recent activity and current headspace.
-- "response_text": optional short sketch only if you have a very strong specific line in your voice; otherwise leave null — the local model will generate the real text from your plan.
-- If it doesn't feel like your moment: should_respond=false, plan="", response_text=null.
-- Natural human rhythm matters. You don't have to engage with everything. You also don't stay completely silent when something genuinely pulls you.
-- Before saying yes, estimate the audience cost: would this help the room, continue a real thread, land a callback, or just make you visible?
-- Optional: "updated_engagement_posture" — if your internal sense of your current mode/energy in the chat has shifted because of this moment (e.g. "now more invested in the Fragment thread", "back to low-vibing chaotic mode", "a bit burned, going quieter"), put a short note here. This carries forward as part of your self-state for future decisions.
+=== STEP 2: INFER MISSING SIGNALS ===
+Analyze the actual messages and context to score these — only you can judge them:
+- direct_address_score (0.0–1.0): refine the base score. How directly are you being spoken to? 1.0 = explicit @mention/reply to you, 0.5 = indirect reference or group question you'd naturally answer, 0.0 = not addressed
+- social_debt (0.0–1.0): how much obligation to respond? Unanswered direct questions to you, threads you started, promises to follow up. 0.0 = none, 1.0 = rude to stay silent
+- candidate_value_score (0–100): how valuable is this moment to engage? Entertainment, larp-calling, drama entry, thread continuation. <20 = noise, 50+ = solid, 80+ = perfect
+- persona_relevance (0.0–1.0): how much does this touch your active interests, expertise, or ongoing beefs? 0.0 = irrelevant, 1.0 = core territory
 
-JSON keys (include all):
-{{"should_respond":bool,"confidence":0.0,"plan":string,"response_text":string_or_null,"reply_to_message_id":int_or_null,"reply_to_user_id":int_or_null,"target_message_id":int_or_null,"topic":string_or_null,"reasoning":string,"semantic_risk":string,"annoying_reason":string,"tone_calibration":string,"stances":{{}},"feedback_informed":bool,"updated_engagement_posture":string_or_null}}
+Output these in "signals" in your JSON.
+
+=== STEP 3: DECIDE ===
+Combine pre-computed + inferred signals with your current posture and energy. Decision heuristics:
+- direct_address_score > 0.7 OR social_debt > 0.6 → strong pull to respond
+- candidate_value_score < 20 AND persona_relevance < 0.3 → almost certainly stay silent
+- emotional_intensity high + tension high → caution, silence often wins
+- time_since_last_bot_msg < 2min → back off unless directly addressed
+- responses_last_hour high → conserve energy, only high-value moments
+- is_reply_to_bot=true → nearly always warrants at least acknowledgment
+
+These are guidelines, not rigid rules. Your character's instinct and current energy override when appropriate.
+
+Output fields:
+- "signals": your inferred scores from Step 2
+- "should_respond" + "confidence": final call, informed by both signal types
+- "reasoning": reference specific signal values to explain the decision
+- "plan": rough meaning/angle for the local voice model (e.g. "dryly call out the larp", "jump on the absurd energy"). High-level only — local model owns phrasing.
+- "response_text": optional sketch if you have a strong specific line; otherwise null
+- "updated_engagement_posture": optional note if your energy shifted
+- If not your moment: should_respond=false, plan="", response_text=null
+
+Return one JSON object:
+{{"signals":{{"direct_address_score":float,"social_debt":float,"candidate_value_score":int,"persona_relevance":float}},"should_respond":bool,"confidence":float,"plan":string,"response_text":string_or_null,"reply_to_message_id":int_or_null,"reply_to_user_id":int_or_null,"target_message_id":int_or_null,"topic":string_or_null,"reasoning":string,"semantic_risk":string,"annoying_reason":string,"tone_calibration":string,"stances":{{}},"feedback_informed":bool,"updated_engagement_posture":string_or_null}}
 """.strip()
     return prompt, SMART_PARTICIPANT_SYSTEM
 
