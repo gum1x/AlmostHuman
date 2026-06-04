@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-import random
-import re
+import os
 import signal
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any
 
 from conversation_engine.ai_client import (
     FakeAiClient,
@@ -17,13 +18,14 @@ from conversation_engine.bootstrap import run_bootstrap
 from conversation_engine.style_rewriter import LocalStyleRewriter
 from conversation_engine.config import EngineConfig, load_engine_config
 from conversation_engine.context_builder import (
-    build_response_context,
+    ContextBundle,
     build_context,
     compute_quantitative_signals,
     format_quantitative_signals,
+    select_target_message,
 )
 from conversation_engine.engagement_gate import GateResult, compute_gate_score
-from conversation_engine.enrichment import build_brief, current_context_text, enrich_messages
+from conversation_engine.enrichment import Brief, build_brief, current_context_text, enrich_messages
 from conversation_engine.feedback_loop import FeedbackLoop, run_meta_reflection
 from conversation_engine.memory_manager import ConversationMemoryManager
 from conversation_engine.persona_engine import (
@@ -44,72 +46,36 @@ from storage.database import async_session_factory, dispose_engine
 log = get_logger(__name__)
 
 
-_UNSAFE_CASUAL_TERMS = {
-    "otp",
-    "sim",
-    "swap",
-    "bank",
-    "cc",
-    "card",
-    "cvv",
-    "ssn",
-    "fraud",
-    "scam",
-    "steal",
-    "stolen",
-    "phish",
-    "dox",
-    "doxx",
-    "combo",
-    "config",
-    "cashapp",
-    "paypal",
-    "dirty",
-    "launder",
-    "tumbler",
-    "mixer",
-    "monero",
-    "logs",
-    "method",
-}
+@dataclass(frozen=True)
+class _CyclePrep:
+    chat_id: int
+    is_private_dm: bool
+    active_bot_thread: bool
+    new_message_count: int
+    snapshot_message_id: int | None
+    gate: GateResult
+    visible_numeric_controls: dict[str, Any]
+    brief: Brief
+    enriched: list
+    context: ContextBundle
+    raw_context: str
+    high_level_enriched: list
+    recent_enriched_for_summary: list
+    recent_bot_mem: list
+    bot_sent_ids: set[int]
+    recent_bot_activity: str
+    posture: str
+    responses_last_hour: int
 
-_CASUAL_REPLIES = {
-    "hi": "yo",
-    "hii": "yo",
-    "hello": "yo",
-    "hey": "yo",
-    "yo": "yo",
-    "yoo": "yo",
-    "yooo": "yo",
-    "yoyoyo": "yo",
-    "sup": "sup",
-    "wsup": "sup",
-    "wsp": "sup",
-    "whats up": "not much wbu",
-    "what's up": "not much wbu",
-    "gm": "gm",
-    "gn": "gn",
-    "lol": "lmao",
-    "lmao": "lmao",
-    "lmfao": "lmao",
-}
 
-_SLANG_ALIASES = {
-    "wsg": "whats good",
-    "hyd": "how you doing",
-    "hbu": "how about you",
-    "wbu": "what about you",
-    "rn": "right now",
-    "u": "you",
-    "ur": "your",
-    "r": "are",
-    "idk": "i dont know",
-    "ngl": "not gonna lie",
-    "fr": "for real",
-    "wyd": "what you doing",
-}
-
-_CLOSERS = {"np", "yep", "yes", "ok", "okay", "k", "thanks", "thank you", "ty", "bet"}
+@dataclass(frozen=True)
+class _CycleLlmOutcome:
+    decision: ResponseDecision
+    request1: Any
+    request2: Any
+    posture: str
+    ok: bool
+    reason: str | None
 
 
 def _append_context_block(context, title: str, body: str):
@@ -122,255 +88,6 @@ def _append_context_block(context, title: str, body: str):
         avg_feedback_score=context.avg_feedback_score,
     )
 
-
-def _casual_key(text: str) -> str:
-    key = re.sub(r"\s+", " ", re.sub(r"[^a-z0-9' ]+", " ", text.lower())).strip()
-    words = [_SLANG_ALIASES.get(word, word) for word in key.split()]
-    return " ".join(words)
-
-
-def _contains_unsafe_terms(text: str) -> bool:
-    return bool(set(_casual_key(text).split()) & _UNSAFE_CASUAL_TERMS)
-
-
-def _looks_like_question(text: str) -> bool:
-    key = _casual_key(text)
-    if "?" in text:
-        return True
-    return key.startswith((
-        "what ",
-        "why ",
-        "who ",
-        "how ",
-        "where ",
-        "when ",
-        "can ",
-        "could ",
-        "should ",
-        "is ",
-        "are ",
-        "do ",
-        "does ",
-        "what you doing",
-        "how you doing",
-        "whats good",
-    ))
-
-
-# --- New spiky character micro-reply system ---
-# Goal: high-frequency ambient chatting that stands out from mild generic chat.
-# Voice: technically sharp + cynical incentive reading + dry/dark humor.
-# High variance: one-word contempt to short precise observation.
-
-_SPICY_SHORT = [
-    "nope",
-    "mid",
-    "lmao",
-    "this",
-    "exactly",
-    "this is just worse incentives with extra steps",
-]
-
-_SPICY_SOCIAL = [
-    "still here unfortunately",
-    "what's the damage today",
-    "the usual pattern recognition",
-    "yo",
-]
-
-_SPICY_DM_SMALLTALK = [
-    "staring at misaligned incentives",
-    "not touching that one",
-    "the usual, you?",
-    "chillin, incentives look bad as always",
-]
-
-_SPICY_DIRECT_QUESTION = [
-    "haven't looked, probably another abstraction no one needed",
-    "the real issue is always the incentives on the other side",
-    "no strong take, narrative is doing too much work",
-    "idk, this smells like exit liquidity in disguise",
-]
-
-_SPICY_BORED = [
-    "same, the mid is relentless today",
-    "the usual slurry of mid takes",
-    "waiting for one actually clean design",
-]
-
-_SPICY_TECH_NIT = [
-    "this is just worse X with extra fees",
-    "the abstraction here is doing negative work",
-    "incentives are completely misaligned on that one",
-    "actually not terrible for once",
-]
-
-
-def _spiky_micro_reply(key: str, *, is_direct: bool, is_private_dm: bool) -> tuple[str, str, float] | None:
-    """Generate a short reply in the sharp, pattern-noticing character voice.
-    High variance by design. Returns (text, reasoning, confidence).
-    """
-    # Unsafe already filtered before calling this.
-
-    # Pure social / greeting / banter
-    if any(x in key for x in ("hi", "hey", "yo", "gm", "gn", "sup", "wsp", "hello")):
-        return random.choice(_SPICY_SOCIAL), "spiky social: low-effort presence with flavor", 0.85
-
-    if key in {"lol", "lmao", "lmfao"}:
-        return random.choice(["lmao", "yeah this is the cycle", "the usual"]), "spiky: dry reaction to obvious", 0.8
-
-    if any(x in key for x in ("test", "testing")):
-        return "still here, unfortunately", "spiky presence check", 0.9
-
-    if any(x in key for x in ("you there", "u there", "are you there")):
-        return random.choice(["still here unfortunately", "yeah, watching the incentives"]), "spiky: direct ping response", 0.85
-
-    # Social hooks / bored / dead chat
-    if any(p in key for p in ("bored", "dead chat", "this chat dead")):
-        return random.choice(_SPICY_BORED), "spiky: honest read on current chat quality", 0.75
-
-    # Small talk questions
-    if any(x in key for x in ("what you doing", "how you doing", "whats good", "wyd", "hyd")):
-        if is_private_dm:
-            return random.choice(_SPICY_DM_SMALLTALK), "spiky DM small talk: cynical but conversational", 0.8
-        return random.choice(["staring at misaligned incentives", "the usual pattern recognition"]), "spiky direct small talk", 0.8
-
-    # Questions in general (DM or direct)
-    if _looks_like_question(key) or "?" in key:  # key is already cleaned
-        if is_private_dm or is_direct:
-            return random.choice(_SPICY_DIRECT_QUESTION), "spiky: short precise or cynical answer to direct question", 0.78
-        # Ambient question in group - only answer if it feels pattern-worthy (rare for pure micro)
-        return None
-
-    # Very short messages in direct or DM context -> acknowledge with character
-    if (is_direct or is_private_dm) and len(key.split()) <= 6:
-        if random.random() < 0.4:
-            return random.choice(["yeah?", "this", "exactly", "mid"]), "spiky: minimal direct ack with attitude", 0.72
-        return random.choice(["what happened", "the usual?"]), "spiky: direct follow-up, slightly irreverent", 0.7
-
-    # Ambient short social in group
-    if not is_direct and not is_private_dm and len(key.split()) <= 5:
-        if random.random() < 0.3:
-            return random.choice(_SPICY_SHORT), "spiky ambient: low cost distinctive interjection", 0.65
-
-    return None
-
-
-def _safe_casual_reply(text: str) -> str | None:
-    # Legacy thin wrapper — real work now happens in _spiky_micro_reply for character.
-    # We keep a tiny safe path for pure greetings to avoid over-triggering on noise.
-    key = _casual_key(text)
-    if not key:
-        return None
-    if key in {"hi", "hii", "hey", "yo", "yoo", "gm", "gn"}:
-        # Let the spiky path handle it for variance
-        return None
-    if key in {"lol", "lmao", "lmfao"}:
-        return None  # spiky path has better dry variants
-    if key in {"test", "testing"}:
-        return "still here, unfortunately"
-    if key in {"you there", "u there", "are you there"}:
-        return None  # spiky path
-    return None
-
-
-def _is_social_hook(text: str) -> bool:
-    key = _casual_key(text)
-    if key in _CLOSERS:
-        return False
-    if _safe_casual_reply(text):
-        return True
-    return any(phrase in key for phrase in ("bored", "dead chat", "what you doing", "how you doing", "whats good"))
-
-
-def _light_participation_reply(key: str, *, is_direct: bool, is_private_dm: bool) -> tuple[str, str, float] | None:
-    """
-    Ultra-light, high-entropy social presence engine.
-    Purpose: enable "almost always chatting" with tiny, varied, low-commitment noise
-    that feels human and does not fight the fine-tuned voice.
-    Deliberately messy and stochastic.
-    """
-    if not key:
-        return None
-
-    # Greetings / ambient social (extremely common in the actual training data)
-    if any(x in key for x in ("hi", "hey", "yo", "gm", "gn", "sup", "wsp", "hello")):
-        if random.random() < 0.65:
-            return random.choice(["yo", "sup", "gm", "lmao", "same", "mhm"]), "light presence: greeting noise", 0.9
-        return random.choice(["yo", "lmao", "nah", "yeah", "this", "fr", "bet", "word"]), "light presence: random social token", 0.85
-
-    if key in {"lol", "lmao", "lmfao", "haha"}:
-        return random.choice(["lmao", "lol", "nah", "fr", "dead", "real", "sheesh", "wild"]), "light: low-effort reaction match", 0.92
-
-    if key in {"test", "testing"}:
-        return random.choice(["here", "yo", "sup", "mhm", "still here"]), "light: test ack", 0.95
-
-    if any(x in key for x in ("you there", "u there", "are you there")):
-        return random.choice(["yeah", "here", "sup", "mhm", "yo"]), "light: direct ping", 0.9
-
-    if any(p in key for p in ("bored", "dead chat", "this chat dead", "anyone alive")):
-        return random.choice(["same", "fr", "dead", "real", "rip", "oof", "yikes"]), "light: acknowledging dead vibe", 0.82
-
-    if any(x in key for x in ("what you doing", "how you doing", "whats good", "wyd", "hyd", "wsp")):
-        if is_private_dm:
-            if random.random() < 0.55:
-                return random.choice(["chillin", "same", "not much", "the usual", "u?"]), "light DM: keeping it going", 0.85
-            return random.choice(["yo", "lmao", "same", "mhm"]), "light DM: low effort reply", 0.8
-        return random.choice(["chillin", "same", "the usual", "lmao"]), "light group: minimal small talk ack", 0.75
-
-    if _looks_like_question(key) or "?" in key:
-        if is_private_dm or is_direct:
-            return random.choice(["idk", "no idea", "probably", "yeah", "nah", "maybe", "fr", "real"]), "light: low-commitment answer", 0.8
-        if random.random() < 0.12:
-            return random.choice(["idk", "nah", "lmao"]), "light: occasional ambient noise", 0.55
-        return None
-
-    if (is_direct or is_private_dm) and len(key.split()) <= 6:
-        if random.random() < 0.65:
-            return random.choice(["yeah", "mhm", "same", "fr", "yo", "lmao", "this"]), "light: minimal direct/DM ack", 0.75
-        return None
-
-    if not is_direct and not is_private_dm and len(key.split()) <= 5:
-        if random.random() < 0.42:
-            return random.choice(["lmao", "yo", "same", "fr", "real", "nah", "this", "wild"]), "light: ambient group noise", 0.65
-        return None
-
-    if is_private_dm and len(key.split()) <= 8:
-        if random.random() < 0.55:
-            return random.choice(["yeah", "mhm", "same", "fr", "yo", random.choice(["lmao", "real", "bet"])]), "light DM: general continuation", 0.7
-
-    return None
-
-
-def _human_motive_reply(text: str, *, is_direct: bool, is_private_dm: bool) -> tuple[str, str, float] | None:
-    key = _casual_key(text)
-    if not key:
-        return None
-
-    # Primary path: ultra-light high-entropy social presence (lets the fine-tune carry voice)
-    candidate = _light_participation_reply(key, is_direct=is_direct, is_private_dm=is_private_dm)
-    if candidate:
-        reply, reasoning, conf = candidate
-        return reply, f"light presence: {reasoning}", conf
-
-    # Legacy casual still works as thin fallback for pure safe cases we didn't catch
-    casual = _safe_casual_reply(text)
-    if casual:
-        return casual, "legacy casual (thin path)", 0.6
-
-    # Fallback for private DMs that didn't hit spiky logic — keep some life
-    if is_private_dm:
-        if key in _CLOSERS:
-            return None
-        if len(key.split()) <= 5:
-            return random.choice(["yeah", "this", "go on"]), "spiky DM keep-alive (fallback)", 0.65
-        return "what's the actual situation", "spiky DM: wants the real story", 0.65
-
-    # Very light ambient fallback for direct in group (rare)
-    if is_direct and len(key.split()) <= 7:
-        return random.choice(["yeah?", "this", "mid"]), "spiky direct minimal", 0.6
-
-    return None
 
 
 class ConversationScheduler:
@@ -430,284 +147,66 @@ class ConversationScheduler:
             interval = await self._run_cycle(chat_id, interval)
             await asyncio.sleep(interval)
 
-    async def _run_cycle(self, chat_id: int, previous_interval: int) -> int:
-        raw_context: str | None = None
-        is_private_dm = chat_id > 0
-        active_bot_thread = False
-        new_message_threshold = (
-            self.config.scheduler.dm_new_message_threshold
-            if is_private_dm
-            else self.config.scheduler.new_message_threshold
+# Patch content - spliced into scheduler.py by maintenance script
+
+    def _backoff_interval(self, previous_interval: int) -> int:
+        return min(
+            self.config.scheduler.max_interval_seconds,
+            int(previous_interval * self.config.scheduler.backoff_multiplier),
         )
-        recent_message_limit = (
-            self.config.scheduler.dm_recent_message_limit
-            if is_private_dm
-            else 50
-        )
+
+    async def _run_reflections_if_needed(self, chat_id: int, is_private_dm: bool) -> None:
+        if is_private_dm:
+            return
         async with async_session_factory() as session:
             async with session.begin():
                 memory = ConversationMemoryManager(session)
-                if await memory.is_circuit_paused(chat_id):
-                    return self.config.scheduler.max_interval_seconds
-
-                try:
-                    latest_decision = await memory.get_latest_ai_decision(chat_id)
-                    snapshot_before = latest_decision.snapshot_message_id if latest_decision else None
-                    new_message_count = await memory.count_messages_after_snapshot(chat_id, snapshot_before)
-                    active_bot_thread = await self._has_new_user_followup_after_bot(memory, chat_id, snapshot_before)
-                    if new_message_count < new_message_threshold:
-                        if not active_bot_thread:
-                            return min(
-                                self.config.scheduler.max_interval_seconds,
-                                int(previous_interval * self.config.scheduler.backoff_multiplier),
-                            )
-                        new_message_count = max(1, new_message_count)
-
-                    await seed_persona_core(memory, self.config)
-                    if not is_private_dm:
-                        reflection_needed, trigger, messages_since_last = await should_run_self_reflection(
-                            memory, chat_id, self.config
-                        )
-                        if reflection_needed:
-                            await run_self_reflection(
-                                chat_id=chat_id,
-                                memory=memory,
-                                ai_client=self.ai_client,
-                                config=self.config,
-                                trigger=trigger,
-                                messages_since_last=messages_since_last,
-                            )
-                        await run_meta_reflection(chat_id, memory, self.ai_client, self.config)
-
-                    messages = await memory.get_recent_messages(chat_id, limit=recent_message_limit)
-                    enriched = enrich_messages(messages, self.config.prompt)
-                    brief = build_brief(enriched)
-                    if is_private_dm:
-                        gate = GateResult(
-                            gate_score=1.0,
-                            gate_factors={"mode": "private_dm"},
-                            should_proceed=True,
-                        )
-                    else:
-                        gate = await compute_gate_score(chat_id, enriched, brief, memory, self.config)
-                    outcome_score_24h = await memory.get_avg_feedback_score(chat_id, window_hours=24)
-                    visible_numeric_controls = {
-                        "tension_level": brief.tension_level,
-                        "outcome_score_24h": outcome_score_24h,
-                    }
-                    snapshot_message_id = await memory.latest_message_id(chat_id)
-                    now = datetime.now(timezone.utc)
-                    await memory.upsert_activity_pattern(
-                        chat_id,
-                        hour_of_day=now.hour,
-                        day_of_week=now.weekday(),
-                        velocity=new_message_count / max(1, self.config.engagement_gate.velocity_window_minutes),
-                        tension=brief.tension_level,
-                    )
-
-                    persona_memories, latest_reflection = await get_relevant_persona_vectors(
-                        chat_id,
-                        current_context_text(enriched),
-                        memory,
-                        top_k=self.config.ai.persona_top_k,
-                    )
-                    current_persona = await memory.get_persona_core()
-
-                    # Build lightweight "my recent activity as me" for the smart model
-                    # so it has persistent memory of its own engagement (key for natural timing).
-                    recent_bot_mem = await memory.get_recent_bot_memory(chat_id, limit=6)
-                    recent_activity_lines = []
-                    for bm in recent_bot_mem:
-                        if bm.response_text:
-                            recent_activity_lines.append(
-                                f"I said (to user_{bm.reply_to_user_id or '?'}): {bm.response_text[:120]}"
-                            )
-                            if bm.reasoning:
-                                recent_activity_lines.append(f"  (my reasoning at the time: {bm.reasoning[:100]})")
-                    recent_bot_activity = "\n".join(recent_activity_lines) if recent_activity_lines else ""
-
-                    context = await build_context(
-                        chat_id,
-                        enriched,
-                        brief,
-                        gate,
-                        memory,
-                        persona_memories,
-                        latest_reflection,
-                        current_persona,
-                        token_budget=self.config.ai.total_context_token_budget,
-                        recent_bot_activity=recent_bot_activity,
-                    )
-                    raw_context = context.context
-                    if active_bot_thread:
-                        raw_context = (
-                            f"{context.context}\n\n"
-                            "active_bot_thread: true"
-                        )
-                        context = type(context)(
-                            context=raw_context,
-                            candidate_user_ids=context.candidate_user_ids,
-                            relationship_profiles=context.relationship_profiles,
-                            avg_feedback_score=context.avg_feedback_score,
-                        )
-
-                    summary_prompt, summary_system = build_context_summary_prompt(context, self.config)
-                    request1 = await self.ai_client.call_perception_model(summary_prompt, summary_system)
-                    context_summary = parse_context_summary(request1.text)
-                    if context_summary.summary:
-                        context = _append_context_block(
-                            context,
-                            "PERCEPTION SUMMARY",
-                            context_summary.summary,
-                        )
-
-                    # For the smart model decision, give it the richer self-referential context
-                    # (persona + recent activity as itself + posture signals) so it can think
-                    # like a real participant with its own history and rhythm.
-                    # The perception summary is still used to keep things focused, but we feed
-                    # the fuller participant view for the actual "as this character" decision.
-                    decision_context = type(context)(
-                        context=context.context,  # the enriched version with WHO I AM, MY RECENT ACTIVITY, etc.
-                        candidate_user_ids=context.candidate_user_ids,
-                        relationship_profiles=context.relationship_profiles,
-                        avg_feedback_score=context.avg_feedback_score,
-                    )
-
-                    # === PRE-COMPUTED QUANTITATIVE SIGNALS ===
-                    # These are hard facts from DB/state that the decision model reads directly.
-                    # The model will then infer additional signals (social_debt, persona_relevance, etc.)
-                    # from the conversation context before making its final decision.
-                    responses_last_hour = await memory.count_bot_responses(chat_id, window_minutes=60)
-                    bot_sent_ids = {
-                        bm.sent_message_id for bm in recent_bot_mem
-                        if bm.sent_message_id is not None
-                    }
-                    time_since_last_bot: float | None = None
-                    if recent_bot_mem:
-                        latest_bot_ts = getattr(recent_bot_mem[0], "created_at", None)
-                        if latest_bot_ts:
-                            time_since_last_bot = (datetime.now(timezone.utc) - latest_bot_ts).total_seconds() / 60.0
-
-                    quant_signals = compute_quantitative_signals(
-                        enriched_messages=enriched,
-                        brief=brief,
-                        bot_user_id=self.bot_user_id,
-                        bot_sent_message_ids=bot_sent_ids,
-                        time_since_last_bot_msg_min=time_since_last_bot,
-                        chat_velocity=new_message_count / max(1, self.config.engagement_gate.velocity_window_minutes),
-                        responses_last_hour=responses_last_hour,
-                        avg_feedback_score=outcome_score_24h,
-                    )
-                    posture = await self._infer_social_posture(chat_id, is_private_dm, memory, brief, active_bot_thread)
-                    signals_block = format_quantitative_signals(quant_signals)
-
-                    enriched_for_decision = (
-                        f"{context.context}\n\n"
-                        f"=== PRE-COMPUTED SIGNALS ===\n{signals_block}\n"
-                        f"current_posture={posture}"
-                    )
-                    decision_context = type(context)(
-                        context=enriched_for_decision,
-                        candidate_user_ids=context.candidate_user_ids,
-                        relationship_profiles=context.relationship_profiles,
-                        avg_feedback_score=context.avg_feedback_score,
-                    )
-
-                    # === HYBRID ARCHITECTURE ===
-                    # Smart model = the actual participant character (rich constructed personality).
-                    # It decides when to speak, who, and the *rough high-level meaning/intent*
-                    # using its own persistent history and current posture.
-                    # The fine-tuned local model is the dumb voice renderer only — it gets a
-                    # minimal prompt with the rough plan + tiny context and turns it into
-                    # the real cracked group phrasing. Smart model does NOT craft low-level text.
-                    decision_prompt, decision_system = build_response_decision_prompt(
-                        decision_context,
-                        "",
-                        self.config,
-                    )
-                    request2 = await self.ai_client.call_decision_model(decision_prompt, decision_system)
-                    decision = parse_response_decision(request2.text)
-
-                    if decision.should_respond and self.style_rewriter.enabled:
-                        plan_signal = (decision.plan or decision.reasoning or "").strip()
-                        if plan_signal:
-                            phrased = await self.style_rewriter.phrase(
-                                context=raw_context or "",
-                                plan=plan_signal,
-                                target_message="",  # the full context already includes the target block
-                                tone=decision.tone_calibration or "",
-                            )
-                            if phrased and phrased.strip():
-                                decision.response_text = phrased
-                            # otherwise fall back to any sketch the smart model provided
-
-                    ok, reason = validate(decision, self.config)
-                    if ok:
-                        ok, reason = await self._passes_social_safety(
-                            chat_id=chat_id,
-                            is_private_dm=is_private_dm,
-                            active_bot_thread=active_bot_thread,
-                            enriched=enriched,
-                            memory=memory,
-                            decision=decision,
-                            gate=gate,
-                        )
-                    stored_decision = await memory.insert_ai_decision(
+                reflection_needed, trigger, messages_since_last = await should_run_self_reflection(
+                    memory, chat_id, self.config
+                )
+                if reflection_needed:
+                    await run_self_reflection(
                         chat_id=chat_id,
-                        prompt_version=self.config.ai.prompt_version,
-                        snapshot_message_id=snapshot_message_id,
-                        new_message_count=new_message_count,
-                        should_respond=ok,
-                        confidence=decision.confidence,
-                        response_text=decision.response_text,
-                        reply_to_message_id=decision.reply_to_message_id,
-                        reasoning=(
-                            (decision.reasoning or "")
-                            + (f" | posture update: {decision.updated_engagement_posture}" if decision.updated_engagement_posture else "")
-                        ) if ok else reason,
-                        gate_score=gate.gate_score,
-                        gate_factors=visible_numeric_controls,
-                        request1_latency_ms=request1.latency_ms,
-                        request1_tokens_used=request1.tokens_used,
-                        request2_tokens_used=request2.tokens_used,
+                        memory=memory,
+                        ai_client=self.ai_client,
+                        config=self.config,
+                        trigger=trigger,
+                        messages_since_last=messages_since_last,
                     )
-                    if not ok:
-                        await memory.record_cycle_success(chat_id)
-                        return self.config.scheduler.initial_interval_seconds
+                await run_meta_reflection(chat_id, memory, self.ai_client, self.config)
 
-                    sent_message_id = await self.sender.send_message(
-                        chat_id,
-                        decision.response_text or "",
-                        decision.reply_to_message_id,
-                    )
-                    await memory.update_ai_decision_sent_message(stored_decision.id, sent_message_id)
-                    bot_memory = await memory.insert_bot_memory(
-                        chat_id=chat_id,
-                        sent_message_id=sent_message_id,
-                        response_text=decision.response_text or "",
-                        reply_to_user_id=decision.reply_to_user_id,
-                        reply_to_message_id=decision.reply_to_message_id,
-                        reasoning=decision.reasoning,
-                        tone_calibration=decision.tone_calibration,
-                        brief_snapshot=brief.as_dict(),
-                        stances=decision.stances,
-                        prompt_version=self.config.ai.prompt_version,
-                        cycle_snapshot_message_id=snapshot_message_id,
-                    )
-                    await write_interaction_memory(
+    async def _run_cycle(self, chat_id: int, previous_interval: int) -> int:
+        is_private_dm = chat_id > 0
+        raw_context: str | None = None
+        try:
+            await self._run_reflections_if_needed(chat_id, is_private_dm)
+
+            async with async_session_factory() as session:
+                async with session.begin():
+                    memory = ConversationMemoryManager(session)
+                    if await memory.is_circuit_paused(chat_id):
+                        return self.config.scheduler.max_interval_seconds
+                    prep_result = await self._prepare_cycle(
                         memory,
                         chat_id,
-                        decision.reply_to_user_id,
-                        decision.topic,
-                        decision.response_text or "",
+                        is_private_dm,
+                        previous_interval,
                     )
-                    for topic, stance in decision.stances.items():
-                        await memory.upsert_stance(chat_id, topic=topic, stance=str(stance), user_id=decision.reply_to_user_id)
-                        await write_stance_memory(memory, chat_id, decision.reply_to_user_id, topic, str(stance))
-                    await self.feedback_loop.schedule_observation(bot_memory.id, sent_message_id, chat_id)
-                    await memory.record_cycle_success(chat_id)
-                    return self.config.scheduler.initial_interval_seconds
-                except Exception as exc:
+                    if isinstance(prep_result, int):
+                        return prep_result
+                    prep = prep_result
+                    raw_context = prep.raw_context
+
+            llm_out = await self._execute_llm(prep)
+
+            async with async_session_factory() as session:
+                async with session.begin():
+                    memory = ConversationMemoryManager(session)
+                    return await self._finalize_cycle(memory, prep, llm_out)
+        except Exception as exc:
+            async with async_session_factory() as session:
+                async with session.begin():
+                    memory = ConversationMemoryManager(session)
                     await memory.insert_failed_cycle(
                         chat_id=chat_id,
                         stage="cycle",
@@ -720,11 +219,343 @@ class ConversationScheduler:
                         self.config.circuit_breaker.failure_threshold,
                         self.config.circuit_breaker.pause_duration_minutes,
                     )
-                    await log.aexception("conversation_cycle_failed", chat_id=chat_id)
-                    return min(
-                        self.config.scheduler.max_interval_seconds,
-                        int(previous_interval * self.config.scheduler.backoff_multiplier),
-                    )
+            await log.aexception("conversation_cycle_failed", chat_id=chat_id)
+            return self._backoff_interval(previous_interval)
+
+    async def _prepare_cycle(
+        self,
+        memory: ConversationMemoryManager,
+        chat_id: int,
+        is_private_dm: bool,
+        previous_interval: int,
+    ) -> int | _CyclePrep:
+        new_message_threshold = (
+            self.config.scheduler.dm_new_message_threshold
+            if is_private_dm
+            else self.config.scheduler.new_message_threshold
+        )
+        recent_message_limit = (
+            self.config.scheduler.dm_recent_message_limit if is_private_dm else 50
+        )
+
+        latest_decision = await memory.get_latest_ai_decision(chat_id)
+        snapshot_before = latest_decision.snapshot_message_id if latest_decision else None
+        new_message_count = await memory.count_messages_after_snapshot(chat_id, snapshot_before)
+        active_bot_thread = await self._has_new_user_followup_after_bot(memory, chat_id, snapshot_before)
+        if new_message_count < new_message_threshold:
+            if not active_bot_thread:
+                return self._backoff_interval(previous_interval)
+            new_message_count = max(1, new_message_count)
+
+        await seed_persona_core(memory, self.config)
+
+        messages = await memory.get_recent_messages(chat_id, limit=recent_message_limit)
+        enriched = enrich_messages(messages, self.config.prompt)
+
+        high_level_limit = self.config.scheduler.high_level_message_limit
+        high_level_messages = await memory.get_recent_messages(chat_id, limit=high_level_limit)
+        high_level_enriched = enrich_messages(high_level_messages, self.config.prompt)
+        recent_context_limit = self.config.scheduler.recent_context_limit
+        recent_for_summary = high_level_messages[-recent_context_limit:] if high_level_messages else messages
+        recent_enriched_for_summary = (
+            enrich_messages(recent_for_summary, self.config.prompt) if recent_for_summary else enriched
+        )
+
+        recent_bot_mem = await memory.get_recent_bot_memory(chat_id, limit=6)
+        recent_activity_lines = []
+        for bm in recent_bot_mem:
+            if bm.response_text:
+                recent_activity_lines.append(
+                    f"I said (to user_{bm.reply_to_user_id or '?'}): {bm.response_text[:120]}"
+                )
+                if bm.reasoning:
+                    recent_activity_lines.append(f"  (my reasoning at the time: {bm.reasoning[:100]})")
+                if getattr(bm, "current_posture", None):
+                    recent_activity_lines.append(f"  (my posture after: {bm.current_posture})")
+        recent_bot_activity = "\n".join(recent_activity_lines) if recent_activity_lines else ""
+        bot_sent_ids = {bm.sent_message_id for bm in recent_bot_mem if bm.sent_message_id is not None}
+
+        brief = build_brief(enriched)
+        if is_private_dm:
+            gate = GateResult(gate_score=1.0, gate_factors={"mode": "private_dm"}, should_proceed=True)
+        else:
+            gate = await compute_gate_score(chat_id, enriched, brief, memory, self.config)
+
+        outcome_score_24h = await memory.get_avg_feedback_score(chat_id, window_hours=24)
+        visible_numeric_controls = {
+            "tension_level": brief.tension_level,
+            "outcome_score_24h": outcome_score_24h,
+        }
+        snapshot_message_id = await memory.latest_message_id(chat_id)
+        now = datetime.now(timezone.utc)
+        await memory.upsert_activity_pattern(
+            chat_id,
+            hour_of_day=now.hour,
+            day_of_week=now.weekday(),
+            velocity=new_message_count / max(1, self.config.engagement_gate.velocity_window_minutes),
+            tension=brief.tension_level,
+        )
+
+        target_for_direct = select_target_message(enriched)
+        is_direct_for_gate = active_bot_thread
+        if target_for_direct:
+            txt = target_for_direct.cleaned_text or target_for_direct.text or ""
+            if self._mentions_bot(txt) or target_for_direct.reply_to_message_id in bot_sent_ids:
+                is_direct_for_gate = True
+
+        if not is_private_dm and not gate.should_proceed:
+            if is_direct_for_gate:
+                gate = GateResult(
+                    gate_score=gate.gate_score,
+                    gate_factors={**gate.gate_factors, "direct_mention_forced": True},
+                    should_proceed=True,
+                )
+                await log.ainfo(
+                    "direct_mention_forced_gate_proceed",
+                    chat_id=chat_id,
+                    message_id=getattr(target_for_direct, "message_id", None),
+                )
+            else:
+                await memory.insert_ai_decision(
+                    chat_id=chat_id,
+                    prompt_version=self.config.ai.prompt_version,
+                    snapshot_message_id=snapshot_message_id,
+                    new_message_count=new_message_count,
+                    should_respond=False,
+                    confidence=round(max(0.05, gate.gate_score), 3),
+                    response_text=None,
+                    reply_to_message_id=None,
+                    reasoning=(
+                        f"gate blocked: score={gate.gate_score:.3f} < min="
+                        f"{self.config.engagement_gate.min_gate_score_to_send:.2f}. factors="
+                        + ", ".join(
+                            f"{k}={round(v, 2) if isinstance(v, (int, float)) else v}"
+                            for k, v in gate.gate_factors.items()
+                        )
+                    ),
+                    gate_score=gate.gate_score,
+                    gate_factors=gate.gate_factors,
+                    request1_latency_ms=0,
+                    request1_tokens_used=0,
+                    request2_tokens_used=0,
+                )
+                await memory.record_cycle_success(chat_id)
+                return self._backoff_interval(previous_interval)
+
+        persona_memories, latest_reflection = await get_relevant_persona_vectors(
+            chat_id,
+            current_context_text(enriched),
+            memory,
+            top_k=self.config.ai.persona_top_k,
+        )
+        current_persona = await memory.get_persona_core()
+        context = await build_context(
+            chat_id,
+            enriched,
+            brief,
+            gate,
+            memory,
+            persona_memories,
+            latest_reflection,
+            current_persona,
+            token_budget=self.config.ai.total_context_token_budget,
+            recent_bot_activity=recent_bot_activity,
+        )
+        raw_context = context.context
+        if active_bot_thread:
+            raw_context = f"{context.context}\n\nactive_bot_thread: true"
+            context = type(context)(
+                context=raw_context,
+                candidate_user_ids=context.candidate_user_ids,
+                relationship_profiles=context.relationship_profiles,
+                avg_feedback_score=context.avg_feedback_score,
+            )
+
+        posture = await self._infer_social_posture(
+            chat_id, is_private_dm, memory, brief, active_bot_thread, recent_bot_mem=recent_bot_mem
+        )
+        responses_last_hour = await memory.count_bot_responses(chat_id, window_minutes=60)
+
+        return _CyclePrep(
+            chat_id=chat_id,
+            is_private_dm=is_private_dm,
+            active_bot_thread=active_bot_thread,
+            new_message_count=new_message_count,
+            snapshot_message_id=snapshot_message_id,
+            gate=gate,
+            visible_numeric_controls=visible_numeric_controls,
+            brief=brief,
+            enriched=enriched,
+            context=context,
+            raw_context=raw_context,
+            high_level_enriched=high_level_enriched,
+            recent_enriched_for_summary=recent_enriched_for_summary,
+            recent_bot_mem=recent_bot_mem,
+            bot_sent_ids=bot_sent_ids,
+            recent_bot_activity=recent_bot_activity,
+            posture=posture,
+            responses_last_hour=responses_last_hour,
+        )
+
+    async def _execute_llm(self, prep: _CyclePrep) -> _CycleLlmOutcome:
+        context = prep.context
+        summary_prompt, summary_system = build_context_summary_prompt(
+            context,
+            self.config,
+            high_level_enriched=prep.high_level_enriched,
+            recent_enriched=prep.recent_enriched_for_summary,
+        )
+        request1 = await self.ai_client.call_perception_model(summary_prompt, summary_system)
+        context_summary = parse_context_summary(request1.text)
+        summary_body = context_summary.compressed_relevant_context or context_summary.summary
+        if summary_body:
+            header = (
+                "RELEVANT CONVERSATION CONTEXT"
+                if context_summary.compressed_relevant_context
+                else "PERCEPTION SUMMARY"
+            )
+            context = _append_context_block(context, header, summary_body)
+
+        time_since_last_bot: float | None = None
+        if prep.recent_bot_mem:
+            latest_bot_ts = getattr(prep.recent_bot_mem[0], "created_at", None)
+            if latest_bot_ts:
+                time_since_last_bot = (datetime.now(timezone.utc) - latest_bot_ts).total_seconds() / 60.0
+
+        quant_signals = compute_quantitative_signals(
+            enriched_messages=prep.enriched,
+            bot_user_id=self.bot_user_id,
+            bot_sent_message_ids=prep.bot_sent_ids,
+            time_since_last_bot_msg_min=time_since_last_bot,
+            responses_last_hour=prep.responses_last_hour,
+            bot_username=self.bot_username,
+        )
+        if prep.active_bot_thread:
+            quant_signals["direct_mention"] = True
+        signals_block = format_quantitative_signals(quant_signals)
+        enriched_for_decision = (
+            f"{context.context}\n\n"
+            f"=== PRE-COMPUTED SIGNALS ===\n{signals_block}\n"
+            f"current_posture={prep.posture}"
+        )
+        decision_context = type(context)(
+            context=enriched_for_decision,
+            candidate_user_ids=context.candidate_user_ids,
+            relationship_profiles=context.relationship_profiles,
+            avg_feedback_score=context.avg_feedback_score,
+        )
+        decision_prompt, decision_system = build_response_decision_prompt(
+            decision_context,
+            "",
+            self.config,
+        )
+        request2 = await self.ai_client.call_decision_model(decision_prompt, decision_system)
+        decision = parse_response_decision(request2.text)
+
+        if decision.should_respond and self.style_rewriter.enabled:
+            plan_signal = (decision.plan or decision.reasoning or "").strip()
+            if plan_signal:
+                phrased = await self.style_rewriter.phrase(
+                    context=prep.raw_context or "",
+                    plan=plan_signal,
+                    target_message="",
+                    tone=decision.tone_calibration or "",
+                )
+                if phrased and phrased.strip():
+                    decision.response_text = phrased
+
+        ok, reason = validate(decision, self.config)
+        if ok:
+            ok, reason = self._passes_social_safety(
+                is_private_dm=prep.is_private_dm,
+                active_bot_thread=prep.active_bot_thread,
+                enriched=prep.enriched,
+                brief=prep.brief,
+                decision=decision,
+                bot_sent_ids=prep.bot_sent_ids,
+            )
+
+        return _CycleLlmOutcome(
+            decision=decision,
+            request1=request1,
+            request2=request2,
+            posture=prep.posture,
+            ok=ok,
+            reason=reason,
+        )
+
+    async def _finalize_cycle(
+        self,
+        memory: ConversationMemoryManager,
+        prep: _CyclePrep,
+        llm_out: _CycleLlmOutcome,
+    ) -> int:
+        decision = llm_out.decision
+        stored_decision = await memory.insert_ai_decision(
+            chat_id=prep.chat_id,
+            prompt_version=self.config.ai.prompt_version,
+            snapshot_message_id=prep.snapshot_message_id,
+            new_message_count=prep.new_message_count,
+            should_respond=llm_out.ok,
+            confidence=decision.confidence,
+            response_text=decision.response_text,
+            reply_to_message_id=decision.reply_to_message_id,
+            reasoning=(
+                (decision.reasoning or "")
+                + (
+                    f" | posture update: {decision.updated_engagement_posture}"
+                    if decision.updated_engagement_posture
+                    else ""
+                )
+            )
+            if llm_out.ok
+            else llm_out.reason,
+            gate_score=prep.gate.gate_score,
+            gate_factors=prep.visible_numeric_controls,
+            request1_latency_ms=llm_out.request1.latency_ms,
+            request1_tokens_used=llm_out.request1.tokens_used,
+            request2_tokens_used=llm_out.request2.tokens_used,
+        )
+        if not llm_out.ok:
+            await memory.record_cycle_success(prep.chat_id)
+            return self.config.scheduler.initial_interval_seconds
+
+        sent_message_id = await self.sender.send_message(
+            prep.chat_id,
+            decision.response_text or "",
+            decision.reply_to_message_id,
+        )
+        await memory.update_ai_decision_sent_message(stored_decision.id, sent_message_id)
+        persisted_posture = decision.updated_engagement_posture or llm_out.posture
+        bot_memory = await memory.insert_bot_memory(
+            chat_id=prep.chat_id,
+            sent_message_id=sent_message_id,
+            response_text=decision.response_text or "",
+            reply_to_user_id=decision.reply_to_user_id,
+            reply_to_message_id=decision.reply_to_message_id,
+            reasoning=decision.reasoning,
+            tone_calibration=decision.tone_calibration,
+            brief_snapshot=prep.brief.as_dict(),
+            stances=decision.stances,
+            prompt_version=self.config.ai.prompt_version,
+            cycle_snapshot_message_id=prep.snapshot_message_id,
+            current_posture=persisted_posture,
+        )
+        await write_interaction_memory(
+            memory,
+            prep.chat_id,
+            decision.reply_to_user_id,
+            decision.topic,
+            decision.response_text or "",
+        )
+        for topic, stance in decision.stances.items():
+            await memory.upsert_stance(
+                prep.chat_id, topic=topic, stance=str(stance), user_id=decision.reply_to_user_id
+            )
+            await write_stance_memory(memory, prep.chat_id, decision.reply_to_user_id, topic, str(stance))
+        await self.feedback_loop.schedule_observation(bot_memory.id, sent_message_id, prep.chat_id)
+        await memory.record_cycle_success(prep.chat_id)
+        return self.config.scheduler.initial_interval_seconds
 
     async def _has_new_user_followup_after_bot(
         self,
@@ -755,41 +586,27 @@ class ConversationScheduler:
     def _mentions_bot(self, text: str) -> bool:
         if not text:
             return False
-        lowered = text.lower()
-        if self.bot_username and f"@{self.bot_username}" in lowered:
-            return True
-        return "temp3289" in lowered
-
-    def _direct_attention_fallback_text(self, text: str) -> str:
-        if "?" in text:
-            # Character fallback for direct follow-ups after the model stayed silent.
-            return random.choice([
-                "haven't dug in, probably another abstraction no one needed",
-                "the incentives here are doing the heavy lifting",
-                "no strong take, narrative is carrying too much",
-            ])
-        return random.choice(["yeah?", "this", "mid", "exactly"])
-
-    def _message_is_direct(self, message, active_bot_thread: bool, recent_bot_message_ids: set[int] | None = None) -> bool:
-        text = message.text or ""
-        if self._mentions_bot(text):
-            return True
-        if active_bot_thread and message.reply_to_message_id in (recent_bot_message_ids or set()):
-            return True
-        return False
+        return bool(self.bot_username and f"@{self.bot_username}" in text.lower())
 
     async def _infer_social_posture(
         self,
         chat_id: int,
         is_private_dm: bool,
         memory: ConversationMemoryManager,
-        brief,
+        brief: Brief,
         active_bot_thread: bool,
+        recent_bot_mem: list | None = None,
     ) -> str:
         if is_private_dm:
             return "private_dm: responsive but still brief"
         recent_outcome = await memory.get_avg_feedback_score(chat_id, window_hours=24)
         responses_last_10min = await memory.count_bot_responses(chat_id, window_minutes=10)
+        if recent_bot_mem:
+            latest_bm = recent_bot_mem[0]
+            if latest_bm and getattr(latest_bm, "response_text", None):
+                lp = getattr(latest_bm, "current_posture", "") or ""
+                if "hyperactive" in lp.lower() or "engaged" in lp.lower():
+                    return "old timer: recently spoke, might speak again if another moment or opinion strikes"
         if brief.tension_level >= self.config.engagement_gate.anti_flame_tension_threshold:
             return "burned/quiet: tension is high"
         if recent_outcome <= -0.25:
@@ -802,15 +619,15 @@ class ConversationScheduler:
             return "lightly_vibing: available for high-signal or funny moments"
         return "watching: selective and low-ego"
 
-    async def _passes_social_safety(
+    def _passes_social_safety(
         self,
-        chat_id: int,
+        *,
         is_private_dm: bool,
         active_bot_thread: bool,
         enriched,
-        memory: ConversationMemoryManager,
+        brief: Brief,
         decision: ResponseDecision,
-        gate: GateResult,
+        bot_sent_ids: set[int],
     ) -> tuple[bool, str | None]:
         if is_private_dm:
             return True, None
@@ -819,270 +636,20 @@ class ConversationScheduler:
         target_id = decision.reply_to_message_id or decision.target_message_id
         target = by_id.get(int(target_id)) if target_id is not None else None
         if not target:
-            # safety/gating must never block; fall back to most recent message for reply target
             target = enriched[-1] if enriched else None
         if target and decision.reply_to_message_id is None:
             decision.reply_to_message_id = target.message_id
 
+        if brief.tension_level >= self.config.engagement_gate.anti_flame_tension_threshold:
+            if active_bot_thread:
+                return True, None
+            if target:
+                txt = target.cleaned_text or target.text or ""
+                if self._mentions_bot(txt) or target.reply_to_message_id in bot_sent_ids:
+                    return True, None
+            return False, "anti_flame_protection"
+
         return True, None
-
-    async def _send_local_reply(
-        self,
-        chat_id: int,
-        memory: ConversationMemoryManager,
-        snapshot_message_id: int | None,
-        new_message_count: int,
-        message,
-        reply: str,
-        reasoning: str,
-        confidence: float,
-        brief,
-        gate_score: float | None,
-        gate_factors: dict,
-        event_name: str,
-    ) -> None:
-        stored_decision = await memory.insert_ai_decision(
-            chat_id=chat_id,
-            prompt_version=self.config.ai.prompt_version,
-            snapshot_message_id=snapshot_message_id,
-            new_message_count=new_message_count,
-            should_respond=True,
-            confidence=confidence,
-            response_text=reply,
-            reply_to_message_id=message.message_id,
-            reasoning=reasoning,
-            gate_score=gate_score,
-            gate_factors=gate_factors,
-            request1_tokens_used=0,
-            request2_tokens_used=0,
-        )
-        sent_message_id = await self.sender.send_message(chat_id, reply, message.message_id)
-        await memory.update_ai_decision_sent_message(stored_decision.id, sent_message_id)
-        await memory.insert_bot_memory(
-            chat_id=chat_id,
-            sent_message_id=sent_message_id,
-            response_text=reply,
-            reply_to_user_id=message.sender_id,
-            reply_to_message_id=message.message_id,
-            reasoning=reasoning,
-            tone_calibration="local human motive",
-            brief_snapshot=brief.as_dict(),
-            stances={},
-            prompt_version=self.config.ai.prompt_version,
-            cycle_snapshot_message_id=snapshot_message_id,
-        )
-        await log.ainfo(event_name, chat_id=chat_id, message_id=message.message_id, sent_message_id=sent_message_id)
-
-    async def _try_human_motive_reply(
-        self,
-        chat_id: int,
-        is_private_dm: bool,
-        active_bot_thread: bool,
-        enriched,
-        memory: ConversationMemoryManager,
-        snapshot_before: int | None,
-        snapshot_message_id: int | None,
-        new_message_count: int,
-        brief,
-        gate_score: float | None,
-        gate_factors: dict,
-    ) -> bool:
-        new_messages = [
-            message
-            for message in enriched
-            if snapshot_before is None or message.message_id > snapshot_before
-        ]
-        recent_bot_message_ids = {
-            int(row.sent_message_id)
-            for row in await memory.get_recent_bot_memory(chat_id, limit=5)
-            if row.sent_message_id is not None
-        }
-        for message in reversed(new_messages):
-            if self.bot_user_id is not None and message.sender_id == self.bot_user_id:
-                continue
-            text = message.text or ""
-            is_direct = self._message_is_direct(message, active_bot_thread, recent_bot_message_ids)
-            candidate = _human_motive_reply(text, is_direct=is_direct, is_private_dm=is_private_dm)
-            if not candidate:
-                continue
-            if not is_private_dm and not is_direct and not _is_social_hook(text):
-                continue
-
-            reply, reasoning, confidence = candidate
-            await self._send_local_reply(
-                chat_id=chat_id,
-                memory=memory,
-                snapshot_message_id=snapshot_message_id,
-                new_message_count=new_message_count,
-                message=message,
-                reply=reply,
-                reasoning=reasoning,
-                confidence=confidence,
-                brief=brief,
-                gate_score=gate_score,
-                gate_factors=gate_factors,
-                event_name="spiky_character_reply_sent",
-            )
-            return True
-        return False
-
-    async def _try_direct_attention_fallback(
-        self,
-        chat_id: int,
-        active_bot_thread: bool,
-        enriched,
-        memory: ConversationMemoryManager,
-        snapshot_before: int | None,
-        snapshot_message_id: int | None,
-        new_message_count: int,
-        brief,
-        gate_score: float | None,
-        gate_factors: dict,
-        request1_latency_ms: int,
-        request1_tokens_used: int,
-        reasoning: str,
-    ) -> bool:
-        if not active_bot_thread:
-            return False
-        new_messages = [
-            message
-            for message in enriched
-            if snapshot_before is None or message.message_id > snapshot_before
-        ]
-        recent_bot_message_ids = {
-            int(row.sent_message_id)
-            for row in await memory.get_recent_bot_memory(chat_id, limit=5)
-            if row.sent_message_id is not None
-        }
-        for message in reversed(new_messages):
-            if self.bot_user_id is not None and message.sender_id == self.bot_user_id:
-                continue
-            text = message.text or ""
-            if not (self._mentions_bot(text) or message.reply_to_message_id in recent_bot_message_ids):
-                continue
-            reply = self._direct_attention_fallback_text(text)
-            stored_decision = await memory.insert_ai_decision(
-                chat_id=chat_id,
-                prompt_version=self.config.ai.prompt_version,
-                snapshot_message_id=snapshot_message_id,
-                new_message_count=new_message_count,
-                should_respond=True,
-                confidence=0.65,
-                response_text=reply,
-                reply_to_message_id=message.message_id,
-                reasoning=f"direct mention/follow-up fallback after model declined: {reasoning[:300]}",
-                gate_score=gate_score,
-                gate_factors=gate_factors,
-                request1_latency_ms=request1_latency_ms,
-                request1_tokens_used=request1_tokens_used,
-                request2_tokens_used=0,
-            )
-            sent_message_id = await self.sender.send_message(chat_id, reply, message.message_id)
-            await memory.update_ai_decision_sent_message(stored_decision.id, sent_message_id)
-            await memory.insert_bot_memory(
-                chat_id=chat_id,
-                sent_message_id=sent_message_id,
-                response_text=reply,
-                reply_to_user_id=message.sender_id,
-                reply_to_message_id=message.message_id,
-                reasoning="direct mention/follow-up fallback",
-                tone_calibration="short direct",
-                brief_snapshot=brief.as_dict(),
-                stances={},
-                prompt_version=self.config.ai.prompt_version,
-                cycle_snapshot_message_id=snapshot_message_id,
-            )
-            await log.ainfo(
-                "direct_attention_fallback_sent",
-                chat_id=chat_id,
-                message_id=message.message_id,
-                sent_message_id=sent_message_id,
-            )
-            return True
-        return False
-
-    async def _try_safe_casual_reply(
-        self,
-        chat_id: int,
-        is_private_dm: bool,
-        enriched,
-        memory: ConversationMemoryManager,
-        snapshot_before: int | None,
-        snapshot_message_id: int | None,
-        new_message_count: int,
-        brief,
-        gate_score: float | None,
-        gate_factors: dict,
-    ) -> bool:
-        new_messages = [
-            message
-            for message in enriched
-            if snapshot_before is None or message.message_id > snapshot_before
-        ]
-        for message in reversed(new_messages):
-            if self.bot_user_id is not None and message.sender_id == self.bot_user_id:
-                continue
-            reply = _safe_casual_reply(message.text)
-            if not reply:
-                continue
-
-            responses_last_10min = await memory.count_bot_responses(chat_id, window_minutes=10)
-            if (is_private_dm and responses_last_10min >= 3) or (not is_private_dm and responses_last_10min >= 1):
-                await memory.insert_ai_decision(
-                    chat_id=chat_id,
-                    prompt_version=self.config.ai.prompt_version,
-                    snapshot_message_id=snapshot_message_id,
-                    new_message_count=new_message_count,
-                    should_respond=False,
-                    confidence=0.0,
-                    response_text=None,
-                    reply_to_message_id=None,
-                    reasoning="safe casual reply skipped by local rate limit",
-                    gate_score=gate_score,
-                    gate_factors=gate_factors,
-                    request1_tokens_used=0,
-                    request2_tokens_used=0,
-                )
-                return True
-
-            stored_decision = await memory.insert_ai_decision(
-                chat_id=chat_id,
-                prompt_version=self.config.ai.prompt_version,
-                snapshot_message_id=snapshot_message_id,
-                new_message_count=new_message_count,
-                should_respond=True,
-                confidence=0.9,
-                response_text=reply,
-                reply_to_message_id=message.message_id,
-                reasoning="local safe casual reply; skipped model call for token efficiency",
-                gate_score=gate_score,
-                gate_factors=gate_factors,
-                request1_tokens_used=0,
-                request2_tokens_used=0,
-            )
-            sent_message_id = await self.sender.send_message(chat_id, reply, message.message_id)
-            await memory.update_ai_decision_sent_message(stored_decision.id, sent_message_id)
-            await memory.insert_bot_memory(
-                chat_id=chat_id,
-                sent_message_id=sent_message_id,
-                response_text=reply,
-                reply_to_user_id=message.sender_id,
-                reply_to_message_id=message.message_id,
-                reasoning="local safe casual reply",
-                tone_calibration="tiny casual",
-                brief_snapshot=brief.as_dict(),
-                stances={},
-                prompt_version=self.config.ai.prompt_version,
-                cycle_snapshot_message_id=snapshot_message_id,
-            )
-            await log.ainfo(
-                "local_safe_casual_reply_sent",
-                chat_id=chat_id,
-                message_id=message.message_id,
-                sent_message_id=sent_message_id,
-            )
-            return True
-        return False
 
 
 async def main() -> None:
@@ -1097,10 +664,15 @@ async def main() -> None:
 
     # Only use real client if we have a non-dummy key OR an explicit non-xAI base URL (local server)
     use_real_client = bool(config.xai_api_key) and not (is_dummy_key and is_xai_default)
+    if not use_real_client and os.getenv("ALLOW_FAKE_AI", "").lower() != "true":
+        raise RuntimeError(
+            "No AI client configured (missing XAI_API_KEY or local XAI_BASE_URL). "
+            "Set ALLOW_FAKE_AI=true for offline development."
+        )
     ai_client = GrokAiClient(config) if use_real_client else FakeAiClient()
     sender = TelegramSender(config)
     await sender.connect()
-    feedback_loop = FeedbackLoop(config, ai_client)
+    feedback_loop = FeedbackLoop(config, ai_client, sender)
     me = await sender.client.get_me()
     bot_user_id = int(me.id)
     bot_username = getattr(me, "username", None)
