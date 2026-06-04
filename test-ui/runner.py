@@ -3,7 +3,9 @@ Workflow runner that executes the full conversation engine pipeline
 on injected JSON chat data — no database or Telegram connection needed.
 
 Mocks: memory manager, sender (we capture the response instead of sending).
-Real: enrichment, gate scoring (simplified), context building, AI calls,
+Real: enrichment, gate scoring, context building (with persona + recent activity
+      memory injection), slim activity numbers (the kept high-value counts),
+      AI calls (now using the qualitative three-question decision prompt),
       style rewriter (local model phrasing), validation.
 """
 
@@ -27,13 +29,10 @@ from conversation_engine.config import EngineConfig, load_engine_config
 from conversation_engine.context_builder import (
     ContextBundle,
     build_target_message_block,
-    select_target_message,
-    format_vector_memories,
-    build_response_context,
     compute_quantitative_signals,
     format_quantitative_signals,
 )
-from conversation_engine.engagement_gate import GateResult, get_candidate_user_ids
+from conversation_engine.engagement_gate import compute_gate_score, GateResult, get_candidate_user_ids
 from conversation_engine.enrichment import (
     EnrichedMessage,
     Brief,
@@ -49,6 +48,178 @@ from conversation_engine.prompts import (
 from conversation_engine.style_rewriter import LocalStyleRewriter
 from conversation_engine.validators import validate
 from storage.postgres_models import BotPersonaCore, BotSelfReflection, UserRelationshipProfile
+
+
+def _make_context_preview(full_context: str, max_chars: int = 600) -> str:
+    """Return a preview that shows the start + the end (where recent activity / posture / precomp live).
+    This helps in the Test UI see the memory blocks the qualitative 3-question model is using.
+    """
+    if len(full_context) <= max_chars:
+        return full_context
+    head = full_context[: max_chars // 2]
+    tail = full_context[- (max_chars // 2): ]
+    return head + "\n... [middle truncated for preview] ...\n" + tail
+
+
+# =============================================================================
+# TUNABLE PARAMETERS FOR THE TEST UI
+# Gate weights + threshold (real pre-filter before any LLM) + the willingness bias dial.
+# The decision model is now purely qualitative (three questions: situation / what kind of
+# person am I / what does a person like me do, grounded in injected WHO I AM + recent activity
+# + posture memory). The PRE-COMPUTED SIGNALS block now only contains the slim high-value
+# raw activity numbers (responses_last_hour, time_since, is_reply_to_bot, direct_mention) plus the willingness
+# value if the dial is used. The gate threshold is a simple pre-filter (hard skip before LLM).
+# Detailed gate weights are no longer tunable in the UI (qualitative 3Q model does not listen to them).
+# Willingness and slim counts + direct_mention are what the model sees in PRE-COMPUTED.
+# =============================================================================
+
+TUNABLE_META = {
+    # Simplified dials for the current architecture.
+    # Gate is now a simple cheap structural pre-filter (threshold only) before the qualitative 3Q model.
+    # Detailed per-factor weights are no longer exposed (the 3Q reasoning model does not consume
+    # the gate score or its internal factors; it only sees the slim activity numbers + direct_mention
+    # + posture + optional willingness bias in PRE-COMPUTED SIGNALS).
+    # Direct mentions/continuations always force proceed past gate to the reasoning AI.
+    "min_gate_score_to_send": {
+        "label": "Gate Threshold (min score to even consider responding)",
+        "min": 0.0, "max": 1.0, "step": 0.01, "default": 0.25,
+        "desc": "Cheap pre-filter score must be >= this or we hard-skip the model (no LLM call). Lower = more willing to think on marginal social moments. Directs always bypass."
+    },
+    "willingness_to_respond": {
+        "label": "Willingness to Respond (social / presence bias)",
+        "min": 0.0, "max": 1.0, "step": 0.05, "default": 0.75,
+        "desc": "Pure test dial (appended raw to the slim PRE-COMPUTED SIGNALS block). The qualitative decision model (three questions grounded in persona memory) can attend to it as an explicit bias. The character is a bold old timer who is actively in the mix, speaks when the energy or opinion pulls them, enjoys the chaos, and is more willing to chat and participate."
+    },
+}
+
+READONLY_SIGNALS = {"is_reply_to_bot"}
+# is_reply_to_bot is derived from the input message list + previous_bot_memories (the bot_sent check that scans history). You cannot "edit" it without editing the source chat JSON or memories. (chat_velocity was removed from the slim activity numbers block.)
+
+
+# ---------------------------------------------------------------------------
+# Lightweight fake memory manager so we can call the *real* gate (simple threshold pre-filter) + slim
+# compute_quantitative_signals (the high-value activity counts the 3Q model actually sees) without a DB.
+# Seeded from previous_bot_memories for posture + fatigue/time_since. Detailed gate weights are no longer
+# primary UI dials (qualitative model does not listen to them).
+# ---------------------------------------------------------------------------
+
+@dataclass
+class _BotMem:
+    """Duck-type stand-in for storage.postgres_models.BotMemory rows."""
+    current_posture: str | None = None
+    response_text: str | None = None
+    reasoning: str | None = None
+    created_at: datetime | None = None
+    reply_to_user_id: int | None = None
+    sent_message_id: int | None = None
+
+
+class FakeConversationMemoryManager:
+    """Test-only in-memory implementation of the bits of ConversationMemoryManager
+    that compute_gate_score, _infer_social_posture, and context prep use.
+    """
+
+    def __init__(self, previous_bot_memories: list[dict[str, Any]] | None = None, bot_user_id: int | None = None):
+        self._mems: list[_BotMem] = []
+        prev = previous_bot_memories or []
+        for m in prev:
+            self._mems.append(_BotMem(
+                current_posture=m.get("current_posture") or m.get("posture") or m.get("updated_engagement_posture"),
+                response_text=m.get("response_text") or m.get("text"),
+                reasoning=m.get("reasoning"),
+                created_at=self._parse_ts(m.get("created_at") or m.get("timestamp")),
+                reply_to_user_id=m.get("reply_to_user_id"),
+                sent_message_id=m.get("sent_message_id"),
+            ))
+        self.bot_user_id = bot_user_id or 0
+        self._bot_response_count = sum(1 for m in self._mems if m.response_text)
+
+    def _parse_ts(self, ts: Any) -> datetime | None:
+        if ts is None:
+            return None
+        if isinstance(ts, datetime):
+            return ts
+        try:
+            return datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        except Exception:
+            return datetime.now(timezone.utc)
+
+    async def count_messages_in_window(self, chat_id: int, minutes: int = 10) -> int:
+        # Plausible activity for a test chat so velocity factor isn't zero.
+        return 12
+
+    async def count_bot_responses(self, chat_id: int, window_minutes: int = 60) -> int:
+        return max(0, min(12, self._bot_response_count))
+
+    async def avg_relationship_strength(self, chat_id: int, candidate_users: list[int]) -> float:
+        return 0.6
+
+    async def get_activity_pattern(self, chat_id: int, hour: int, weekday: int):
+        return None
+
+    async def count_bot_responses_in_threads(self, chat_id: int, thread_ids: list[int], window_minutes: int) -> int:
+        return 0
+
+    async def get_avg_feedback_score(self, chat_id: int, window_hours: int = 24) -> float:
+        return 0.2
+
+    async def get_relationship_profiles(self, chat_id: int, user_ids: list[int]):
+        return []
+
+    async def get_recent_bot_memory(self, chat_id: int, limit: int = 6):
+        # newest first like real
+        return list(reversed(self._mems[-limit:])) if self._mems else []
+
+    async def get_persona_core(self):
+        return None
+
+    async def insert_bot_memory(self, chat_id: int = 0, **kwargs: Any) -> None:
+        mem = _BotMem(
+            current_posture=kwargs.get("current_posture"),
+            response_text=kwargs.get("response_text"),
+            reasoning=kwargs.get("reasoning"),
+            created_at=datetime.now(timezone.utc),
+            reply_to_user_id=kwargs.get("reply_to_user_id"),
+            sent_message_id=kwargs.get("sent_message_id"),
+        )
+        self._mems.append(mem)
+        if kwargs.get("response_text"):
+            self._bot_response_count += 1
+
+    async def latest_message_id(self, chat_id: int) -> int | None:
+        return 100000
+
+    async def upsert_activity_pattern(self, *args: Any, **kwargs: Any) -> None:
+        pass
+
+
+def _infer_posture_for_test(
+    brief: Brief,
+    avg_feedback: float,
+    responses_last_10min: int,
+    tension_threshold: float = 0.75,
+    active_thread: bool = False,
+    previous_bot_memories: list[dict[str, Any]] | None = None,
+) -> str:
+    """Minimal version of scheduler._infer_social_posture for test runs (no full config/mem)."""
+    # Hyperactive streak from previous_bot_memories (seeded with current_posture from prior responses)
+    prevs = previous_bot_memories or []
+    if prevs:
+        last = prevs[-1] if prevs else {}
+        lp = last.get("current_posture") or last.get("posture") or last.get("updated_engagement_posture") or ""
+        if "hyperactive" in lp.lower() or "engaged" in lp.lower():
+            return "old timer: recently spoke, might speak again if another moment or opinion strikes"
+    if brief.tension_level >= tension_threshold:
+        return "burned/quiet: tension is high"
+    if avg_feedback <= -0.25:
+        return "burned/quiet: recent replies did not land"
+    if active_thread:
+        return "in_thread: direct follow-up exists"
+    if responses_last_10min >= 2:
+        return "lurking: already spoke recently"
+    if brief.tension_level <= 0.25:
+        return "lightly_vibing: available for high-signal or funny moments or just to be present after long silence"
+    return "watching: selective and low-ego"
 
 
 # ---------------------------------------------------------------------------
@@ -103,91 +274,10 @@ class PipelineResult:
 # Fake context builder that works without DB
 # ---------------------------------------------------------------------------
 
-def _build_context_offline(
-    chat_id: int,
-    enriched: list[EnrichedMessage],
-    brief: Brief,
-    gate: GateResult,
-    config: EngineConfig,
-    target_message_id: int | None = None,
-) -> ContextBundle:
-    """Build context without async DB calls — uses only the enriched messages."""
-    candidate_users = get_candidate_user_ids(enriched)
-    entry_points = [target_message_id] if target_message_id else None
-    target = select_target_message(enriched, entry_points)
-    lines = [build_target_message_block(enriched, entry_points)]
-
-    # Nearby window (simplified inline)
-    if target:
-        idx = next(
-            (i for i, m in enumerate(enriched) if m.message_id == target.message_id),
-            len(enriched) - 1,
-        )
-        start = max(0, idx - 2)
-        end = min(len(enriched), idx + 3)
-        thread_ids = {target.message_id}
-        if target.reply_to_message_id is not None:
-            thread_ids.add(target.reply_to_message_id)
-        nearby = [
-            f"{m.message_id} user_{m.sender_id} reply_to={m.reply_to_message_id or 'none'}: {(m.cleaned_text or m.text)[:180]}"
-            for m in enriched[start:end]
-            if m.message_id not in thread_ids
-        ]
-        if nearby:
-            lines.extend(["nearby:", *nearby])
-
-    # Persona identity from config
-    lines.append("=== WHO I AM (my character) ===")
-    lines.append(config.persona.identity)
-    if config.persona.core_beliefs:
-        lines.append("Core beliefs: " + " | ".join(config.persona.core_beliefs))
-    lines.append("How I talk: " + config.persona.speaking_style)
-
-    # Brief signals
-    if brief.tension_level >= 0.5:
-        lines.append(f"signals: tension={brief.tension_level:.2f}")
-
-    # Pre-computed quantitative signals for the decision model
-    quant_signals = compute_quantitative_signals(
-        enriched_messages=enriched,
-        brief=brief,
-        bot_user_id=None,
-        bot_sent_message_ids=set(),
-        time_since_last_bot_msg_min=None,
-        chat_velocity=None,
-        responses_last_hour=0,
-        avg_feedback_score=0.0,
-    )
-    lines.append("=== PRE-COMPUTED SIGNALS ===")
-    lines.append(format_quantitative_signals(quant_signals))
-
-    context_str = "\n".join(lines).strip()
-    return ContextBundle(
-        context=context_str,
-        candidate_user_ids=candidate_users,
-        relationship_profiles=[],
-        avg_feedback_score=0.0,
-    )
-
-
-def _compute_gate_offline(enriched: list[EnrichedMessage], brief: Brief) -> GateResult:
-    """Simplified gate that always proceeds but computes a score from the data."""
-    sentiments = [m.sentiment_score for m in enriched[-20:]]
-    avg_sent = sum(sentiments) / len(sentiments) if sentiments else 0.0
-    tension = brief.tension_level
-    score = max(0.0, min(1.0, 0.5 + avg_sent * 0.3 - tension * 0.2))
-    return GateResult(
-        gate_score=score,
-        gate_factors={
-            "velocity": 1.0,
-            "emotional_trend": max(0.0, (avg_sent + 1.0) / 2.0),
-            "fatigue": 1.0,
-            "topic_alignment": max((m.topic_overlap_score for m in enriched), default=0.0),
-            "tension": tension,
-        },
-        should_proceed=True,
-    )
-
+# (Real compute_gate_score + slim compute_quantitative_signals + Fake mem are used so that
+# the threshold dial affects the hard pre-filter skip, and willingness + slim counts affect
+# the block the qualitative 3Q decision model receives. Detailed gate weights are not exposed
+# in TUNABLE_META because the 3Q model does not listen to gate internals.)
 
 # ---------------------------------------------------------------------------
 # Main pipeline runner
@@ -198,19 +288,62 @@ async def run_pipeline(
     config: EngineConfig | None = None,
     use_real_ai: bool = True,
     target_message_id: int | None = None,
+    previous_bot_memories: list[dict[str, Any]] | None = None,
+    bot_user_id: int | None = 0,
+    overrides: dict[str, Any] | None = None,
 ) -> PipelineResult:
     """
     Run the full conversation engine pipeline on a list of JSON messages.
+    This is the "live tuning" entrypoint for the test UI: the Gate Threshold dial
+    controls the cheap pre-filter hard-skip (before any LLM). The Willingness dial
+    is appended to the slim PRE-COMPUTED SIGNALS block (responses_last_hour,
+    time_since_last_bot_msg_min, is_reply_to_bot, direct_mention + willingness)
+    that the qualitative decision model (three questions) receives and can attend to.
 
-    target_message_id: if set, forces the pipeline to treat that specific
-    message as the one to respond to (instead of defaulting to the latest).
+    Only overrides for keys in TUNABLE_META (and not in READONLY_SIGNALS) are
+    honored. Detailed gate factor weights are no longer primary UI dials (the 3Q
+    model does not listen to gate internals). The decision model answers the three
+    qualitative questions grounded in the injected persona memory + recent "I said"
+    activity + relevant compressed context + direct mention rule.
 
-    Returns a PipelineResult with step-by-step details and the final response.
+    previous_bot_memories: list of prior {"current_posture":, "response_text":, "reasoning":, ...}
+      used to seed Fake mem for realistic fatigue, posture roundtrip, time_since,
+      bot_sent_ids for is_reply checks, *and* to reconstruct "=== MY RECENT ACTIVITY AS ME ==="
+      in the context passed to the decision model. This ensures the qualitative
+      three-question prompt ("What kind of situation...? What kind of person am I?
+      What does a person like me do...?") has the character's own history to reason from,
+      exactly as production does. Server accumulates these across /api/send turns.
+
+    The provided messages_json (the "chat") is split into high-level (~200 most recent)
+    and recent (~10) windows and passed to build_context_summary_prompt. This runs the
+    two-level relevance compressor (the "different prompt") before the 3Q decision so the
+    reasoning AI receives a compressed_relevant_context (with selective exact quotes from
+    high-level only when relevant to the current recent/target). "direct_mention" is also
+    computed (and overridable) and appears in the PRE-COMPUTED block; the decision prompt
+    contains a hard rule that the bot must engage on direct mentions/continuations.
     """
     t0 = time.perf_counter()
     config = config or load_engine_config()
     chat_id = messages_json[0].get("chat_id", -1001234567890) if messages_json else -1001234567890
     result = PipelineResult(chat_id=chat_id)
+    overrides = dict(overrides or {})
+
+    # Extract gate-specific overrides (threshold for pre-filter; weights kept for power-user / API use
+    # even though they are no longer primary dials in the UI — the 3Q model does not listen to gate internals).
+    gate_weight_overrides: dict[str, float] = {}
+    min_gate_override: float | None = None
+    for k, v in list(overrides.items()):
+        if k == "min_gate_score_to_send":
+            try:
+                min_gate_override = float(v)
+            except Exception:
+                pass
+        elif k.startswith("weight_"):
+            real_key = k[7:]  # weight_fatigue -> fatigue
+            try:
+                gate_weight_overrides[real_key] = float(v)
+            except Exception:
+                pass
 
     # --- Step 1: Parse messages ---
     t1 = time.perf_counter()
@@ -234,6 +367,14 @@ async def run_pipeline(
         },
     ))
 
+    # High-level (~200) / recent (~10) split for the context summarizer (the "different prompt"
+    # that produces the compressed relevant context the 3Q reasoning AI actually sees).
+    # Mirrors the prod scheduler fetch + slice. The input "msgs" to the test is treated as the
+    # full available chat history for the scenario.
+    n = len(enriched)
+    high_level_enriched = enriched[-200:] if n > 200 else list(enriched)
+    recent_enriched = enriched[-10:] if n > 10 else list(enriched)
+
     # --- Step 3: Brief ---
     t1 = time.perf_counter()
     brief = build_brief(enriched)
@@ -243,27 +384,167 @@ async def run_pipeline(
         data=brief.as_dict(),
     ))
 
-    # --- Step 4: Gate ---
+    # --- Step 4: Gate (REAL compute_gate_score + overrides) ---
+    # Gate is a simple pre-filter (threshold controls hard skip before LLM). The 3Q qualitative
+    # model does not receive or "listen to" the gate score/factors (only the slim PRE-COMPUTED counts
+    # + direct_mention + willingness if set + posture + persona). Detailed weights dials removed from UI.
     t1 = time.perf_counter()
-    gate = _compute_gate_offline(enriched, brief)
+    fake_mem = FakeConversationMemoryManager(previous_bot_memories=previous_bot_memories, bot_user_id=bot_user_id)
+    gate = await compute_gate_score(
+        chat_id=chat_id,
+        enriched_messages=enriched,
+        brief=brief,
+        memory=fake_mem,
+        config=config,
+        weights_override=gate_weight_overrides or None,
+        min_score_override=min_gate_override,
+    )
+    gate_data = {
+        "gate_score": round(gate.gate_score, 3),
+        "should_proceed": gate.should_proceed,
+        "factors": {k: round(v, 3) if isinstance(v, float) else v for k, v in gate.gate_factors.items()},
+    }
+    if gate_weight_overrides or min_gate_override is not None:
+        # Note: weight overrides are for advanced use; UI no longer surfaces the per-factor weight dials.
+        gate_data["overrides_applied"] = {**gate_weight_overrides, **({"min_gate_score_to_send": min_gate_override} if min_gate_override is not None else {})}
     result.steps.append(StepResult(
         name="engagement_gate",
         duration_ms=int((time.perf_counter() - t1) * 1000),
-        data={
-            "gate_score": round(gate.gate_score, 3),
-            "should_proceed": gate.should_proceed,
-            "factors": {k: round(v, 3) if isinstance(v, float) else v for k, v in gate.gate_factors.items()},
-        },
+        data=gate_data,
     ))
 
     if not gate.should_proceed:
-        result.steps.append(StepResult(name="blocked", data={"reason": "gate_blocked"}))
+        result.steps.append(StepResult(name="blocked", data={"reason": "gate_blocked", "gate_score": gate.gate_score}))
         result.total_duration_ms = int((time.perf_counter() - t0) * 1000)
         return result
 
-    # --- Step 5: Context building ---
+    # --- Step 5: Slim activity numbers (high-value counts only) + overrides ---
+    # The decision model uses the qualitative three-question prompt. We compute/pass the kept
+    # raw counts (responses_last_hour tracker, time_since, is_reply_to_bot + direct_mention checks)
+    # + willingness (if dialed) so the 3Q model has awareness of volume, directness, and test bias.
+    # Gate threshold (if tuned) already affected the pre-filter above; detailed weights not exposed.
     t1 = time.perf_counter()
-    context = _build_context_offline(chat_id, enriched, brief, gate, config, target_message_id)
+
+    # time_since: prefer explicit override (for "what if long silence"), else derive from previous_bot_memories, else -1 (long unknown)
+    time_since = overrides.get("time_since_last_bot_msg_min")
+    if time_since is None:
+        if previous_bot_memories:
+            last = previous_bot_memories[-1]
+            ts = last.get("created_at") or last.get("timestamp")
+            if ts:
+                try:
+                    last_dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+                    time_since = round((datetime.now(timezone.utc) - last_dt).total_seconds() / 60.0, 1)
+                except Exception:
+                    time_since = 60.0  # assume decent silence for test carry-over
+            else:
+                time_since = 60.0
+        else:
+            time_since = -1  # classic "hasn't spoken in a while" starting state
+
+    # responses and feedback can be overridden for fatigue/what-if experiments
+    responses_lh = overrides.get("responses_last_hour")
+    if responses_lh is None:
+        responses_lh = await fake_mem.count_bot_responses(chat_id, 60)
+    avg_fb = overrides.get("avg_feedback_24h")
+    if avg_fb is None:
+        avg_fb = await fake_mem.get_avg_feedback_score(chat_id, 24)
+
+    # bot_sent for is_reply detection in the (now slim) activity numbers
+    bot_sent = {m.get("sent_message_id") for m in (previous_bot_memories or []) if m.get("sent_message_id") is not None}
+
+    quant = compute_quantitative_signals(
+        enriched_messages=enriched,
+        bot_user_id=bot_user_id,
+        bot_sent_message_ids=bot_sent,
+        time_since_last_bot_msg_min=time_since,
+        responses_last_hour=responses_lh,
+        bot_username=overrides.get("bot_username"),
+    )
+
+    # Apply user overrides, but never to readonly derived fields.
+    # Only the slim set from TUNABLE_META (weights + threshold + willingness) are exposed in the UI.
+    applied_overrides: dict[str, Any] = {}
+    for k, v in overrides.items():
+        if k in READONLY_SIGNALS:
+            continue
+        if k in quant:
+            try:
+                quant[k] = float(v) if isinstance(quant[k], (int, float)) else v
+                applied_overrides[k] = v
+            except Exception:
+                pass
+        elif k == "willingness_to_respond":
+            try:
+                quant[k] = float(v)
+                applied_overrides[k] = v
+            except Exception:
+                pass
+
+    # Re-format the block that the decision model will actually see (slim activity numbers + optional willingness).
+    # The qualitative model (three questions) receives this as raw facts about recent output volume.
+    signals_block = format_quantitative_signals(quant)
+    if "willingness_to_respond" in applied_overrides:
+        signals_block += f" | willingness_to_respond={applied_overrides['willingness_to_respond']}"
+
+    # Posture: prefer persisted from previous mems (roundtrip), else infer for this snapshot.
+    # This is critical for the "after long silence" presence logic.
+    recent_mems = await fake_mem.get_recent_bot_memory(chat_id, 3)
+    latest_persisted = recent_mems[0].current_posture if recent_mems and getattr(recent_mems[0], "current_posture", None) else None
+
+    avg_fb_post = overrides.get("avg_feedback_24h", avg_fb)
+    resp_10min = await fake_mem.count_bot_responses(chat_id, 10)
+    tension_thr = overrides.get("anti_flame_tension_threshold", config.engagement_gate.anti_flame_tension_threshold)
+    posture = latest_persisted or _infer_posture_for_test(brief, avg_fb_post, resp_10min, tension_thr, previous_bot_memories=previous_bot_memories)
+
+    # Long silence bias (matches the prompt rule we added): after quiet, default posture leans available for social/chaos presence
+    ts_val = quant.get("time_since_last_bot_msg_min", -1)
+    if (ts_val is None or ts_val > 30 or ts_val == -1) and "burned" not in (posture or ""):
+        if "vibing" not in (posture or ""):
+            posture = "lightly_vibing: available for high-signal or funny moments or just to be present after long silence"
+
+    # Reconstruct "MY RECENT ACTIVITY AS ME" from the seeded previous_bot_memories.
+    # This is critical for the qualitative decision model: the three questions
+    # ("What kind of situation is this? What kind of person am I? What does a person
+    # like me do in a situation like this?") explicitly tell the model to ground
+    # answers in the injected memory, especially the concrete "I said..." history
+    # so it knows its own recent behavior and rhythm (matching the real scheduler path).
+    recent_bot_mem_for_activity = await fake_mem.get_recent_bot_memory(chat_id, limit=6)
+    recent_activity_lines = []
+    for bm in recent_bot_mem_for_activity:
+        if getattr(bm, "response_text", None):
+            recent_activity_lines.append(
+                f"I said (to user_{getattr(bm, 'reply_to_user_id', None) or '?'}): {bm.response_text[:120]}"
+            )
+            if getattr(bm, "reasoning", None):
+                recent_activity_lines.append(f"  (my reasoning at the time: {bm.reasoning[:100]})")
+            if getattr(bm, "current_posture", None):
+                recent_activity_lines.append(f"  (my posture after: {bm.current_posture})")
+    recent_bot_activity = "\n".join(recent_activity_lines) if recent_activity_lines else ""
+
+    # Assemble the exact context the decision model receives (mirrors scheduler,
+    # including the recent activity reconstruction so the 3-question qualitative
+    # prompt has the memory blocks it references).
+    target_block = build_target_message_block(enriched, [target_message_id] if target_message_id else None)
+    whoami_lines = [
+        "=== WHO I AM (my character) ===",
+        getattr(config.persona, "identity", "") or "",
+    ]
+    if getattr(config.persona, "core_beliefs", None):
+        whoami_lines.append("Core beliefs: " + " | ".join(config.persona.core_beliefs))
+    whoami_lines.append("How I talk: " + (getattr(config.persona, "speaking_style", "") or ""))
+    precomp_lines = f"=== PRE-COMPUTED SIGNALS ===\n{signals_block}\ncurrent_posture={posture}"
+    full_ctx_for_decision = "\n".join([target_block, *whoami_lines, precomp_lines]).strip()
+    if recent_bot_activity:
+        full_ctx_for_decision += f"\n\n=== MY RECENT ACTIVITY AS ME ===\n{recent_bot_activity}"
+
+    context = ContextBundle(
+        context=full_ctx_for_decision,
+        candidate_user_ids=get_candidate_user_ids(enriched),
+        relationship_profiles=[],
+        avg_feedback_score=avg_fb,
+    )
+
     result.steps.append(StepResult(
         name="context_building",
         duration_ms=int((time.perf_counter() - t1) * 1000),
@@ -271,7 +552,26 @@ async def run_pipeline(
             "context_length": len(context.context),
             "candidate_users": context.candidate_user_ids,
             "target_message_id": target_message_id,
-            "context_preview": context.context[:500],
+            "posture": posture,
+            "precomputed_block": signals_block,
+            "overrides_applied": applied_overrides,
+            "context_preview": _make_context_preview(context.context),
+            "includes_my_recent_activity_as_me": bool(recent_bot_activity),
+            "recent_activity_length": len(recent_bot_activity) if recent_bot_activity else 0,
+            "recent_activity_excerpt": recent_bot_activity[:250] if recent_bot_activity else "",
+        },
+    ))
+
+    # Also surface a dedicated precomp step so UI can highlight the slim activity numbers block
+    # the (qualitative) decision model actually receives.
+    result.steps.append(StepResult(
+        name="precomputed_signals",
+        duration_ms=0,
+        data={
+            "block": signals_block,
+            "posture": posture,
+            "time_since": ts_val,
+            "overrides": applied_overrides,
         },
     ))
 
@@ -283,7 +583,11 @@ async def run_pipeline(
 
     t1 = time.perf_counter()
     try:
-        summary_prompt, summary_system = build_context_summary_prompt(context, config)
+        summary_prompt, summary_system = build_context_summary_prompt(
+            context, config,
+            high_level_enriched=high_level_enriched,
+            recent_enriched=recent_enriched,
+        )
         request1 = await ai_client.call_perception_model(summary_prompt, summary_system)
         context_summary = parse_context_summary(request1.text)
         result.steps.append(StepResult(
@@ -292,14 +596,18 @@ async def run_pipeline(
             data={
                 "relevant_context": context_summary.relevant_context,
                 "summary": context_summary.summary,
+                "compressed_relevant_context": context_summary.compressed_relevant_context,
+                "high_level_included": context_summary.high_level_included,
+                "direct_mention_or_continuation": context_summary.direct_mention_or_continuation,
                 "reasoning": context_summary.reasoning,
                 "tokens_used": request1.tokens_used,
                 "raw_response": request1.text[:500],
             },
         ))
-        # Append perception summary to context if relevant
-        if context_summary.summary:
-            enriched_ctx = f"{context.context}\n\n=== PERCEPTION SUMMARY ===\n{context_summary.summary}"
+        summary_body = context_summary.compressed_relevant_context or context_summary.summary
+        if summary_body:
+            header = "RELEVANT CONVERSATION CONTEXT" if context_summary.compressed_relevant_context else "PERCEPTION SUMMARY"
+            enriched_ctx = f"{context.context}\n\n=== {header} ===\n{summary_body}"
             context = ContextBundle(
                 context=enriched_ctx,
                 candidate_user_ids=context.candidate_user_ids,
@@ -313,7 +621,7 @@ async def run_pipeline(
             error=str(exc),
         ))
 
-    # --- Step 7: AI Decision ---
+    # --- Step 7: AI Decision (the model sees the overridden precomp + posture) ---
     t1 = time.perf_counter()
     decision = None
     raw_context = context.context
@@ -343,7 +651,7 @@ async def run_pipeline(
         result.total_duration_ms = int((time.perf_counter() - t0) * 1000)
         return result
 
-    # --- Step 8: Local Style Rewriter (LoRA phrasing) ---
+    # --- Step 8: Local Style Rewriter ---
     style_rewriter = LocalStyleRewriter(config)
     if decision.should_respond and style_rewriter.enabled:
         t1 = time.perf_counter()
@@ -371,7 +679,6 @@ async def run_pipeline(
                 ))
                 if phrased_text:
                     decision.response_text = phrased_text
-                    # Update decision data with the new text
                     result.decision["response_text"] = phrased_text
                     result.decision["style_rewriter_applied"] = True
             except Exception as exc:

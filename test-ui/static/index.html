@@ -50,6 +50,17 @@
         <div class="chat-actions">
           <button id="btn-run" class="btn btn-primary" title="Run through full pipeline">Run Pipeline</button>
           <button id="btn-delete" class="btn btn-danger" title="Remove this chat">Delete</button>
+          <button id="btn-simulate" class="btn btn-primary" title="Reset to empty and replay every user message from the transcript one-by-one, inserting live model replies">▶ Bulk Simulate</button>
+          <select id="sim-delay" title="Pacing between user turns (Instant = max speed, no typing)">
+            <option value="0">Instant</option>
+            <option value="80">Fast</option>
+            <option value="250" selected>Normal</option>
+            <option value="800">Slow</option>
+          </select>
+          <button id="btn-sim-pause" class="btn hidden">⏸ Pause</button>
+          <button id="btn-sim-stop" class="btn hidden">■ Stop</button>
+          <button id="btn-reset-orig" class="btn" title="Restore the originally imported transcript (removes any simulated bot replies)">Reset</button>
+          <span id="sim-status" class="sim-status hidden"></span>
         </div>
       </div>
 
@@ -66,11 +77,38 @@
         <!-- Pipeline panel -->
         <div id="pipeline-panel">
           <h3>Pipeline Steps</h3>
+
+          <!-- Tunables editor — this is where you edit the changeable numbers.
+               Only dials that actually affect behavior the qualitative model or pre-filter listens to.
+               (Gate threshold for hard pre-skip; willingness bias appended to signals the 3Q sees.)
+               Detailed gate factor weights removed from UI (model does not consume them).
+               Drag, then use Re-run with edits (or just Run at top after setting). -->
+          <div id="tunables-panel" class="hidden">
+            <div class="tunables-header">
+              <h4>Tunable Dials (only things you can actually change)</h4>
+              <div class="tunables-actions">
+                <button id="btn-rerun-overrides" class="btn btn-primary btn-small">Re-run with edits</button>
+                <button id="btn-reset-overrides" class="btn btn-small">Reset</button>
+                <button id="btn-clear-overrides" class="btn btn-small">Clear</button>
+              </div>
+            </div>
+            <div id="tunables-sliders"></div>
+            <div id="tunables-note" class="tunables-note">
+              Editable dials: Gate Threshold (simple pre-filter: if score below this we hard-skip the LLM entirely) and Willingness to Respond (test bias appended to the slim PRE-COMPUTED SIGNALS the 3Q model sees).
+              Detailed per-factor Gate Weights (velocity, emotional, fatigue, feedback) are no longer shown here — we don't expose them because the qualitative decision model (the three questions) does not listen to or consume the internal gate factors at all. The gate is now just a cheap structural pre-filter; directs/continuations always force proceed to the reasoning AI. What the model actually attends to: the slim activity numbers (responses_last_hour, time_since_last_bot_msg_min, is_reply_to_bot, direct_mention) + optional willingness + current_posture + the injected persona memory + relevant context. Gate still runs and is reported in the engagement_gate step for observability.
+            </div>
+          </div>
+
           <div id="pipeline-steps"></div>
         </div>
       </div>
     </div>
   </main>
+</div>
+
+<!-- Context menu for right-click on AI (bot) messages to reply as another user -->
+<div id="context-menu" class="context-menu" style="display:none;">
+  <div class="cm-item" data-action="reply-user">Reply as another user to this message</div>
 </div>
 
 <script src="/static/app.js"></script>

@@ -32,7 +32,7 @@ for p in (str(PROJECT_ROOT), str(TEST_UI_DIR)):
         sys.path.insert(0, p)
 
 from conversation_engine.config import load_engine_config
-from runner import run_pipeline, PipelineResult, StepResult
+from runner import run_pipeline, PipelineResult, StepResult, TUNABLE_META, READONLY_SIGNALS
 
 app = FastAPI(title="Conversation Engine Test UI")
 
@@ -42,6 +42,9 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 # In-memory store of uploaded chats (session-scoped)
 _chats: dict[str, list[dict[str, Any]]] = {}
+# Previous bot memories (posture, responses, reasoning) for carry-over across turns
+# and for re-runs with different overrides on the same chat snapshot.
+_bot_mems: dict[str, list[dict[str, Any]]] = {}
 _config = None
 
 
@@ -92,6 +95,15 @@ async def list_chats():
     }
 
 
+@app.get("/api/tunables")
+async def get_tunables():
+    """Return the definition of what can be edited in the test UI (friendly labels, ranges, only changeable things)."""
+    return {
+        "readonly": list(READONLY_SIGNALS),
+        "tunables": TUNABLE_META,
+    }
+
+
 @app.get("/api/chat/{name}")
 async def get_chat(name: str):
     if name not in _chats:
@@ -105,14 +117,34 @@ async def delete_chat(name: str):
     return {"status": "ok"}
 
 
+@app.post("/api/reset/{name}")
+async def reset_chat(name: str, payload: dict[str, Any] | None = None):
+    """Reset chat messages (and clear bot mems for clean 'from 0' sims).
+    Optional body { "messages": [...] } to seed a base transcript (e.g. original user turns).
+    Always clears _bot_mems[name] so subsequent sends start with fresh posture/activity state.
+    """
+    msgs = (payload or {}).get("messages")
+    _chats[name] = list(msgs) if msgs is not None else []
+    _bot_mems[name] = []
+    return {"status": "ok", "name": name, "message_count": len(_chats[name])}
+
+
 @app.post("/api/run/{name}")
 async def run_chat(name: str, payload: dict[str, Any] | None = None):
-    """Run the full pipeline on a chat. Optionally pass {"target_message_id": N} to target a specific message."""
+    """Run the full pipeline on a chat. Pass {"overrides": {...}, "target_message_id": N} for live tuning."""
     if name not in _chats:
         return JSONResponse({"error": "Chat not found"}, status_code=404)
     config = _get_config()
     target_id = (payload or {}).get("target_message_id")
-    result = await run_pipeline(_chats[name], config=config, target_message_id=target_id)
+    overrides = (payload or {}).get("overrides") or {}
+    prev = _bot_mems.get(name, [])
+    result = await run_pipeline(
+        _chats[name],
+        config=config,
+        target_message_id=target_id,
+        previous_bot_memories=prev,
+        overrides=overrides,
+    )
     return _serialize_result(result)
 
 
@@ -140,9 +172,11 @@ async def send_message(name: str, payload: dict[str, Any]):
     }
     msgs.append(new_msg)
 
-    # Run pipeline
+    # Run pipeline (with current mem state + any overrides from payload)
     config = _get_config()
-    result = await run_pipeline(msgs, config=config)
+    overrides = payload.get("overrides") or {}
+    prev = _bot_mems.get(name, [])
+    result = await run_pipeline(msgs, config=config, previous_bot_memories=prev, overrides=overrides)
 
     # If bot responded, append bot message to chat
     bot_msg = None
@@ -159,6 +193,18 @@ async def send_message(name: str, payload: dict[str, Any]):
             "is_bot": True,
         }
         msgs.append(bot_msg)
+
+    # Accumulate bot memory entry for posture / recent activity carry-over on future runs/sends
+    if result.decision:
+        mem_entry = {
+            "current_posture": result.decision.get("updated_engagement_posture"),
+            "response_text": result.response_text,
+            "reasoning": result.decision.get("reasoning"),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "reply_to_user_id": result.decision.get("reply_to_user_id"),
+            "sent_message_id": None,  # not real send in test
+        }
+        _bot_mems.setdefault(name, []).append(mem_entry)
 
     return {
         "user_message": new_msg,
@@ -178,16 +224,25 @@ async def ws_run(websocket: WebSocket, name: str):
             await websocket.close()
             return
 
-        # Read optional initial message for target_message_id
+        # Read optional initial message for target_message_id + overrides (so you can set dials before clicking Run and have them apply even over WS)
         target_id = None
+        overrides = {}
         try:
             init_msg = await asyncio.wait_for(websocket.receive_json(), timeout=0.5)
             target_id = init_msg.get("target_message_id")
+            overrides = init_msg.get("overrides") or {}
         except (asyncio.TimeoutError, Exception):
             pass
 
         config = _get_config()
-        result = await run_pipeline(_chats[name], config=config, target_message_id=target_id)
+        prev = _bot_mems.get(name, [])
+        result = await run_pipeline(
+            _chats[name],
+            config=config,
+            target_message_id=target_id,
+            previous_bot_memories=prev,
+            overrides=overrides,
+        )
 
         # Stream each step
         for step in result.steps:
