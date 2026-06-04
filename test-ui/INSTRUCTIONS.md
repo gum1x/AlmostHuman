@@ -41,6 +41,7 @@ Needs python3.11+ (`/opt/homebrew/bin/python3.11`). Override with `PYTHON=/path/
 3. "Run Pipeline" runs the full workflow (enrichment > gate > context > perception > decision > validation)
 4. Type messages in the input to chat — bot responds through the real pipeline
 5. Pipeline steps show in the right panel, click to expand details
+6. For bulk/long transcripts: after loading, click "▶ Bulk Simulate" (with speed selector). It resets the view to 0 messages then feeds each *user* turn from the import sequentially, letting the model generate + show replies live in the chat pane (one-by-one append + typing animation for bot text to simulate streaming). Pause/Resume/Stop + Reset (revert to imported snapshot, clears bot mem state) are supported. Excellent for 100-500+ message exports to observe full conversation dynamics, posture carry-over, etc. Use Instant for speed when you just want the final interleaved result. (Real XAI key = real Grok replies during replay; no key = Fake client always silent but still exercises the live UI replay mechanics.)
 
 ## JSON format
 
@@ -66,3 +67,11 @@ Only `message_id` and `text` are required. The rest have defaults.
 - With `XAI_API_KEY` set in `.env`, uses real Grok for perception + decision
 - Without it, uses FakeAiClient (always returns silent) — good for testing pipeline mechanics
 - Server binds 0.0.0.0:7777 so any device on the network can access it
+
+## New: Right-click to reply
+- Right-click any message the AI (BOT) sent in the chat view.
+- Choose "Reply as another user to this message" from the context menu.
+- Type your reply text in the bottom input (placeholder will indicate the reply target).
+- Send (Enter or button) will add your message with the correct `reply_to_message_id` and run the pipeline (AI may respond again).
+- Press Esc while input focused to cancel a pending reply-to.
+- This is great for testing multi-turn, direct mentions, hyperactive streaks, is_reply_to_bot, posture updates, etc. after the AI has spoken.
