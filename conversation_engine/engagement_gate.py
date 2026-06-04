@@ -47,6 +47,8 @@ async def compute_gate_score(
     brief: Brief | None,
     memory: ConversationMemoryManager,
     config: EngineConfig,
+    weights_override: dict[str, float] | None = None,
+    min_score_override: float | None = None,
 ) -> GateResult:
     factors: dict[str, float | str] = {}
     gate_config = config.engagement_gate
@@ -83,7 +85,11 @@ async def compute_gate_score(
     factors["historical_activity"] = min(pattern.avg_message_velocity / 5.0, 1.0) if pattern else 0.5
 
     active_thread_ids = get_active_thread_message_ids(enriched_messages, brief)
-    recent_thread_responses = await memory.count_bot_responses_in_threads(chat_id, active_thread_ids, 30)
+    recent_thread_responses = await memory.count_bot_responses_in_threads(
+        chat_id,
+        active_thread_ids,
+        gate_config.same_thread_cooldown_minutes,
+    )
     if recent_thread_responses >= gate_config.thread_repeat_penalty_count:
         factors["thread_repeat"] = max(0.1, 1.0 - (recent_thread_responses - 1) * 0.35)
     else:
@@ -103,12 +109,22 @@ async def compute_gate_score(
         "thread_repeat": 0.10,
         "feedback_signal": 0.05,
     }
-    gate_score = sum(float(factors[key]) * weight for key, weight in weights.items())
+    if weights_override:
+        weights.update({k: float(v) for k, v in weights_override.items() if k in weights})
+
+    gate_score = sum(float(factors.get(key, 0.0)) * weight for key, weight in weights.items())
+    gate_score = max(0.0, min(1.0, gate_score))
+
+    min_score = min_score_override if min_score_override is not None else gate_config.min_gate_score_to_send
+    should_proceed = gate_score >= min_score
+    if responses_last_10min >= gate_config.max_group_responses_per_10min:
+        should_proceed = False
+        factors["rate_limit_10min"] = float(responses_last_10min)
+
     result = GateResult(
-        gate_score=max(0.0, min(1.0, gate_score)),
+        gate_score=gate_score,
         gate_factors=factors,
-        # The score is advisory context for Grok, not a hard model-call gate.
-        should_proceed=True,
+        should_proceed=should_proceed,
     )
     record_gate(result.gate_score, {key: float(value) for key, value in factors.items() if isinstance(value, int | float)})
     return result
