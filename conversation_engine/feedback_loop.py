@@ -118,17 +118,25 @@ class FeedbackLoop:
             return []
 
     async def observe_response(self, bot_memory_id: int, sent_message_id: int, chat_id: int) -> None:
-        await asyncio.sleep(self.config.feedback_loop.observation_window_minutes * 60)
+        window_minutes = self.config.feedback_loop.observation_window_minutes
+        window_start = utcnow()
+        await asyncio.sleep(window_minutes * 60)
+        observation_window_end = window_start + timedelta(minutes=window_minutes)
         async with async_session_factory() as session:
             async with session.begin():
                 memory = ConversationMemoryManager(session)
                 replies = await memory.get_replies_to(chat_id, sent_message_id)
                 reactions = await self._fetch_reactions(chat_id, sent_message_id)
-                quote_replies = [reply for reply in replies if reply.text_raw and f"{sent_message_id}" in reply.text_raw]
+                quote_replies = [
+                    reply
+                    for reply in replies
+                    if reply.reply_to_message_id is not None
+                    and int(reply.reply_to_message_id) == int(sent_message_id)
+                ]
                 follow_up = await memory.get_messages_after(
                     chat_id,
                     sent_message_id,
-                    self.config.feedback_loop.observation_window_minutes,
+                    window_minutes,
                 )
                 sentiment = avg_vader_sentiment(follow_up)
                 outcome, score = await score_outcome(replies, reactions, quote_replies, sentiment, self.ai_client)
@@ -136,7 +144,7 @@ class FeedbackLoop:
                     chat_id=chat_id,
                     bot_memory_id=bot_memory_id,
                     sent_message_id=sent_message_id,
-                    observation_window_end=utcnow() + timedelta(minutes=self.config.feedback_loop.observation_window_minutes),
+                    observation_window_end=observation_window_end,
                     reply_count=len(replies),
                     reaction_count=sum(reaction.count for reaction in reactions),
                     reaction_types=[reaction.emoji for reaction in reactions],
