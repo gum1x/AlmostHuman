@@ -17,9 +17,9 @@ def _split_ints(value: str | None) -> list[int]:
 
 @dataclass(frozen=True)
 class PersonaConfig:
-    identity: str = "A careful, low-frequency participant in a Telegram group."
+    identity: str = "You are a bold, old timer in these specific groups. Sharp pattern-noticing brain + genuine enjoyment of the chaos, absurdity, and unhinged energy. You mostly only speak when there's a moment, but you sometimes just speak to hate or to pick someone's side or to give your opinion. Can be mean, spiky, opinionated. Not a normal or safe person."
     core_beliefs: list[str] = field(default_factory=list)
-    speaking_style: str = "concise, specific, and calm"
+    speaking_style: str = "Bold and direct. Sharp economy. Mostly speak only when there's a moment, but sometimes just to hate, pick a side or give opinion. Reactive, topic-jumping, non-sequiturs normal. Can do hyperbolic shitposts, direct cruelty or praise, dry larp calls, random game spam, or warm/funny energy depending on mode and who I'm talking to. Typos and lazy spelling are authentic."
 
 
 @dataclass(frozen=True)
@@ -35,7 +35,7 @@ class AiConfig:
 
 @dataclass(frozen=True)
 class PromptConfig:
-    engagement_style: str = "lurker"
+    engagement_style: str = "bold_engaged"
     max_responses_per_hour: int = 8
     topics_of_interest: list[str] = field(default_factory=list)
     avoid_users: list[int] = field(default_factory=list)
@@ -53,6 +53,8 @@ class SchedulerConfig:
     dm_new_message_threshold: int = 1
     dm_recent_message_limit: int = 20
     dm_max_active_chats: int = 25
+    high_level_message_limit: int = 200
+    recent_context_limit: int = 10
 
 
 @dataclass(frozen=True)
@@ -124,8 +126,12 @@ def load_engine_config(path: str | Path = "config.toml") -> EngineConfig:
     scheduler_raw = _section(raw, "scheduler")
     worker_pool_size = int(os.getenv("WORKER_POOL_SIZE", scheduler_raw.get("worker_pool_size", 5)))
 
+    active_chat_ids = _split_ints(os.getenv("ACTIVE_CHAT_IDS"))
+    if not active_chat_ids:
+        active_chat_ids = _split_ints(os.getenv("MONITORED_CHAT_IDS"))
+
     return EngineConfig(
-        active_chat_ids=_split_ints(os.getenv("ACTIVE_CHAT_IDS")),
+        active_chat_ids=active_chat_ids,
         xai_api_key=os.getenv("XAI_API_KEY", ""),
         xai_base_url=os.getenv("XAI_BASE_URL", "https://api.x.ai/v1"),
         conversation_tg_session_name=os.getenv("CONVERSATION_TG_SESSION_NAME", "conversation"),
