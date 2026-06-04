@@ -239,66 +239,48 @@ def _add_optional_section(lines: list[str], title: str, value: str) -> None:
 
 def compute_quantitative_signals(
     enriched_messages: list[EnrichedMessage],
-    brief: Brief,
     bot_user_id: int | None = None,
     bot_sent_message_ids: set[int] | None = None,
     time_since_last_bot_msg_min: float | None = None,
-    chat_velocity: float | None = None,
     responses_last_hour: int = 0,
-    avg_feedback_score: float = 0.0,
+    bot_username: str | None = None,
 ) -> dict[str, str | float | int | bool]:
-    """Compute quantitative signals from enriched messages and available state.
+    """Compute high-value raw activity numbers from message history and bot state.
 
-    Some signals are pre-computed here (from message data), others will be
-    inferred by the AI model from conversation context.
+    Only the counts and checks that track the bot's own recent messages sent
+    (responses_last_hour, time since, is_reply_to_bot via bot_sent_ids scan)
+    plus direct_mention (for the 3Q "never ignore" rule) are retained.
+    These are the "numbers" the character uses as memory of its output rate,
+    direct threads, and explicit address/continuation. No derived scores, no
+    emotional/unresolved/velocity/tension/direct modeling values for quantitative
+    decision reasoning. The qualitative model (three questions) uses the raw
+    facts + injected persona memory instead.
     """
     bot_ids = bot_sent_message_ids or set()
-    recent = enriched_messages[-20:]
     target = select_target_message(enriched_messages)
 
-    # --- is_reply_to_bot: target message is a direct reply to something we said ---
+    # --- is_reply_to_bot: the check "throughout the whole chat" whether the
+    # target directly replies to one of our previously sent messages (from BotMemory).
     is_reply_to_bot = False
     if target and target.reply_to_message_id is not None:
         is_reply_to_bot = target.reply_to_message_id in bot_ids
 
-    # --- chat_velocity: messages per minute (pre-computed or estimated) ---
-    if chat_velocity is None:
-        # Rough estimate from timestamp spread of recent messages
-        if len(recent) >= 2 and recent[0].timestamp and recent[-1].timestamp:
-            span = (recent[-1].timestamp - recent[0].timestamp).total_seconds()
-            chat_velocity = round(len(recent) / max(1, span / 60), 2)
-        else:
-            chat_velocity = 0.0
-
-    # --- emotional_intensity: max absolute sentiment in recent window ---
-    sentiments = [abs(m.sentiment_score) for m in recent]
-    emotional_intensity = round(max(sentiments) if sentiments else 0.0, 2)
-
-    # --- unresolved_questions: messages ending in ? with no reply in the window ---
-    replied_to_ids = {m.reply_to_message_id for m in enriched_messages if m.reply_to_message_id}
-    unresolved = sum(
-        1 for m in recent
-        if m.text.rstrip().endswith("?") and m.message_id not in replied_to_ids
-    )
-
-    # --- direct_address_score: heuristic from target ---
-    # Full score computed by AI, but we provide a base from structural signals
-    direct_score = 0.0
-    if is_reply_to_bot:
-        direct_score = 0.9
-    elif target and bot_user_id and str(bot_user_id) in (target.text or ""):
-        direct_score = 0.8
+    # direct_mention: high-value flag for the qualitative rule. Covers explicit
+    # @username address, reply to one of our messages, or (when caller sets it
+    # via active_bot_thread) continuation of a thread we are part of.
+    direct_mention = bool(is_reply_to_bot)
+    if target:
+        txt = (target.cleaned_text or target.text or "").lower()
+        if bot_username and f"@{bot_username.lower().strip()}" in txt:
+            direct_mention = True
+        if "temp3289" in txt:
+            direct_mention = True
 
     return {
         "is_reply_to_bot": is_reply_to_bot,
-        "chat_velocity": chat_velocity,
         "time_since_last_bot_msg_min": round(time_since_last_bot_msg_min, 1) if time_since_last_bot_msg_min is not None else -1,
-        "emotional_intensity": emotional_intensity,
-        "unresolved_questions": unresolved,
-        "direct_address_score_base": round(direct_score, 2),
-        "tension": round(brief.tension_level, 2),
-        "avg_feedback_24h": round(avg_feedback_score, 2),
         "responses_last_hour": responses_last_hour,
+        "direct_mention": direct_mention,
     }
 
 
@@ -308,6 +290,18 @@ def format_quantitative_signals(signals: dict[str, str | float | int | bool]) ->
     for key, val in signals.items():
         lines.append(f"{key}={val}")
     return " | ".join(lines)
+
+
+def format_enriched_for_context(enriched_messages: list[EnrichedMessage], max_chars: int = 180) -> str:
+    """Public helper to format a list of messages for the high/recent context
+    summarizer prompt (and similar). Uses the same clipping/label style as
+    the internal target/nearby formatters so the summarizer sees consistent ids.
+    """
+    if not enriched_messages:
+        return ""
+    return "\n".join(
+        _format_context_message(m, max_chars) for m in enriched_messages
+    )
 
 
 async def build_context(

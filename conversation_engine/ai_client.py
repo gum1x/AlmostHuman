@@ -22,18 +22,13 @@ class PerceptionDecision(BaseModel):
     annoying_reason: str = ""
 
 
-class AnalyzedSignals(BaseModel):
-    """Quantitative signals the AI model analyzes from context before deciding."""
-    direct_address_score: float = 0.0  # 0-1: how directly is the bot being addressed
-    social_debt: float = 0.0  # 0-1: obligation to respond (unanswered question, active thread, etc.)
-    candidate_value_score: int = 0  # 0-100: how valuable is responding to this moment
-    persona_relevance: float = 0.0  # 0-1: how relevant is this to the character's interests/expertise
-
-
 class ResponseDecision(BaseModel):
+    # NOTE: the prior quantitative decision model (STEP 2 inferred scores + AnalyzedSignals)
+    # has been removed. The decision prompt now uses the qualitative three-question model
+    # ("What kind of situation...", "What kind of person am I?", "What does a person like me do...?").
+    # "signals" is no longer part of the output contract (defensively popped in parse).
     should_respond: bool = False
     confidence: float = 0.0
-    signals: AnalyzedSignals = Field(default_factory=AnalyzedSignals)  # AI-analyzed quantitative signals
     response_text: str | None = None
     reply_to_message_id: int | None = None
     reply_to_user_id: int | None = None
@@ -52,6 +47,11 @@ class ResponseDecision(BaseModel):
 class ContextSummary(BaseModel):
     relevant_context: bool = False
     summary: str = ""
+    # New richer output from the high/recent compressor (the actual context
+    # passed to the 3Q reasoning AI). Legacy "summary" kept for compat.
+    compressed_relevant_context: str = ""
+    high_level_included: bool = False
+    direct_mention_or_continuation: bool = False
     target_message_id: int | None = None
     context_message_ids: list[int] = Field(default_factory=list)
     reasoning: str = ""
@@ -170,7 +170,7 @@ class FakeAiClient:
                 text=json.dumps(
                     {
                         "reflection_text": "No production model is configured, so this is a placeholder reflection.",
-                        "updated_summary": "The bot should remain concise, careful, and low-frequency.",
+                        "updated_summary": "The bot should be bold, eager to engage, and useful — high frequency is fine when making friends or enemies.",
                         "drift_explanation": "No drift measured by fake client.",
                         "relationship_updates": [],
                         "tone_adjustments": "No changes.",
@@ -199,15 +199,21 @@ class FakeAiClient:
                 latency_ms=0,
                 tokens_used=0,
             )
-        if "Summarize only context needed" in prompt:
+        if "Summarize only context needed" in prompt or "HIGH-LEVEL CONTEXT" in prompt or "compressed_relevant_context" in prompt:
+            # Return a payload that exercises the new high/recent compressor fields.
+            # In real runs with a long chat the perception model will actually decide
+            # relevance and may quote exact prior details + set direct_mention_or_continuation.
             return AiCallResult(
                 text=json.dumps(
                     {
-                        "relevant_context": False,
-                        "summary": "",
+                        "relevant_context": True,
+                        "summary": "recent context only (fake)",
+                        "compressed_relevant_context": ("target + recent; HIGH-LEVEL RELEVANT: " + ("foo deal 1.2m (pulled from high)" if "foo deal" in prompt.lower() else "none")) if "HIGH-LEVEL CONTEXT" in prompt else "target + recent window (fake)",
+                        "high_level_included": "foo deal" in prompt.lower() if "HIGH-LEVEL CONTEXT" in prompt else False,
+                        "direct_mention_or_continuation": ("@" in prompt or "direct" in prompt.lower() or "reply_to" in prompt.lower()),
                         "target_message_id": None,
                         "context_message_ids": [],
-                        "reasoning": "fake client",
+                        "reasoning": "fake client - recent self-contained (or direct=false)",
                     }
                 ),
                 latency_ms=0,
@@ -223,12 +229,6 @@ class FakeAiClient:
         return AiCallResult(
             text=json.dumps(
                 {
-                    "signals": {
-                        "direct_address_score": 0.0,
-                        "social_debt": 0.0,
-                        "candidate_value_score": 0,
-                        "persona_relevance": 0.0,
-                    },
                     "should_respond": False,
                     "confidence": 0.0,
                     "response_text": None,
@@ -296,21 +296,9 @@ def parse_response_decision(text: str) -> ResponseDecision:
         payload["stances"] = {}
     if not isinstance(payload.get("updated_engagement_posture"), str | type(None)):
         payload["updated_engagement_posture"] = None
-    # Coerce signals sub-object
-    if not isinstance(payload.get("signals"), dict):
-        payload["signals"] = {}
-    signals = payload["signals"]
-    for float_key in ("direct_address_score", "social_debt", "persona_relevance"):
-        if float_key in signals:
-            try:
-                signals[float_key] = max(0.0, min(1.0, float(signals[float_key])))
-            except (ValueError, TypeError):
-                signals[float_key] = 0.0
-    if "candidate_value_score" in signals:
-        try:
-            signals["candidate_value_score"] = max(0, min(100, int(signals["candidate_value_score"])))
-        except (ValueError, TypeError):
-            signals["candidate_value_score"] = 0
+    # Old outputs may still contain a "signals" object from the prior quantitative model.
+    # The qualitative three-question model no longer emits it; pop defensively.
+    payload.pop("signals", None)
     return ResponseDecision.model_validate(payload)
 
 
@@ -323,9 +311,20 @@ def parse_context_summary(text: str) -> ContextSummary:
         payload["reasoning"] = str(payload.get("reasoning") or "")
     if not isinstance(payload.get("context_message_ids"), list):
         payload["context_message_ids"] = []
+    # New compressor fields (high/recent relevance for 3Q reasoning AI)
+    if not isinstance(payload.get("compressed_relevant_context"), str):
+        payload["compressed_relevant_context"] = str(payload.get("compressed_relevant_context") or "")
+    payload["high_level_included"] = _coerce_bool(payload.get("high_level_included"))
+    payload["direct_mention_or_continuation"] = _coerce_bool(payload.get("direct_mention_or_continuation"))
+    # Compat: if the new compressed field is missing but legacy summary exists, use it
+    if not payload.get("compressed_relevant_context") and payload.get("summary"):
+        payload["compressed_relevant_context"] = payload["summary"]
     if not payload["relevant_context"]:
         payload["summary"] = ""
+        payload["compressed_relevant_context"] = ""
         payload["context_message_ids"] = []
+        payload["high_level_included"] = False
+        payload["direct_mention_or_continuation"] = False
     return ContextSummary.model_validate(payload)
 
 
