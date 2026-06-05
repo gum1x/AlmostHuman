@@ -464,7 +464,10 @@ class ConversationScheduler:
                 if phrased and phrased.strip():
                     decision.response_text = phrased
 
-        ok, reason = validate(decision, self.config)
+        recent_bot_texts = [
+            bm.response_text for bm in prep.recent_bot_mem if getattr(bm, "response_text", None)
+        ]
+        ok, reason = validate(decision, self.config, recent_bot_texts=recent_bot_texts)
         if ok:
             ok, reason = self._passes_social_safety(
                 is_private_dm=prep.is_private_dm,
