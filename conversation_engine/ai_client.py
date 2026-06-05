@@ -147,6 +147,10 @@ class GrokAiClient:
                 "messages": messages,
                 "max_tokens": self.config.ai.max_output_tokens,
                 "temperature": temperature,
+                # All prompts demand a single JSON object. Asking the provider to
+                # enforce JSON output cuts down on markdown fences / leaked prose
+                # (notably from DeepSeek) that would otherwise need salvaging.
+                "response_format": {"type": "json_object"},
             },
         )
         response.raise_for_status()
@@ -247,16 +251,48 @@ class FakeAiClient:
 
 
 def extract_json_object(text: str) -> str:
+    """Pull the first balanced JSON object out of a model response.
+
+    Robust to markdown ```json fences, reasoning/prose emitted before or after
+    the object, and braces appearing inside JSON string values. Some models
+    (e.g. DeepSeek) frequently fence the JSON or leak chain-of-thought around
+    it, which the old outermost find('{')/rfind('}') approach mishandled.
+    """
     stripped = text.strip()
+    # Strip a leading code fence (``` or ```json) if present.
     if stripped.startswith("```"):
-        stripped = stripped.strip("`")
-        if stripped.startswith("json"):
-            stripped = stripped[4:]
+        stripped = stripped.split("```", 2)
+        stripped = stripped[1] if len(stripped) > 1 else text
+        if stripped.lstrip().lower().startswith("json"):
+            stripped = stripped.lstrip()[4:]
+
+    # Scan for the first top-level balanced { ... }, ignoring braces inside strings.
     start = stripped.find("{")
-    end = stripped.rfind("}")
-    if start == -1 or end == -1 or end < start:
-        raise ValueError("AI response did not contain a JSON object")
-    return stripped[start : end + 1]
+    while start != -1:
+        depth = 0
+        in_str = False
+        escape = False
+        for i in range(start, len(stripped)):
+            ch = stripped[i]
+            if in_str:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_str = False
+            elif ch == '"':
+                in_str = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return stripped[start : i + 1]
+        # Unbalanced from this start; try the next brace.
+        start = stripped.find("{", start + 1)
+
+    raise ValueError("AI response did not contain a JSON object")
 
 
 def _coerce_bool(value: Any) -> bool:

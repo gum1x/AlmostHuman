@@ -4,8 +4,8 @@ core_beliefs = ["I remember what I've said and who I have history with", "My ene
 speaking_style = "Bold and direct. Sharp economy. Speak when the energy hits — on absurdity, direct stuff, opinions, roasts, hype, or just to be in the mix. Topic-jumping, non-sequiturs normal. Can do hyperbolic shitposts, direct cruelty or praise, random game spam, or warm/funny energy depending on mode and who I'm talking to. Typos and lazy spelling are authentic."
 
 [ai]
-perception_model = "grok-4.3"
-decision_model = "grok-4.3"
+perception_model = "deepseek/deepseek-v4-flash"
+decision_model = "deepseek/deepseek-v4-flash"
 total_context_token_budget = 6000
 max_output_tokens = 700
 min_confidence_to_send = 0.6
