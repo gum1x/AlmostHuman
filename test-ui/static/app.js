@@ -189,7 +189,9 @@ function updateRunButton() {
 // ---- Send message ----
 async function sendMessage() {
   if (!currentChat) return;
-  if (simState && simState.active) return;
+  // Only block while a simulation is actively running. A paused sim leaves
+  // simState.active === true, which used to silently swallow manual sends.
+  if (simState && simState.active && !simState.paused) return;
   const text = msgInput.value.trim();
   if (!text) return;
   msgInput.value = '';
@@ -242,7 +244,7 @@ msgInput.addEventListener('keydown', (e) => {
 // ---- Run pipeline ----
 async function runPipeline() {
   if (!currentChat) return;
-  if (simState && simState.active) return;
+  if (simState && simState.active && !simState.paused) return;
   const targetId = selectedMessageId;
   lastTargetId = targetId;
   btnRun.disabled = true;
@@ -739,7 +741,7 @@ function updateSimUI() {
     return;
   }
   simStatusEl.classList.remove('hidden');
-  simStatusEl.textContent = `Simulating ${sim.index}/${sim.total} • bots: ${sim.botCount || 0}`;
+  simStatusEl.textContent = `Simulating ${sim.index}/${sim.total} • responses: ${sim.botCount || 0}`;
   if (btnSimulate) btnSimulate.classList.add('hidden');
   if (btnSimStop) btnSimStop.classList.remove('hidden');
   if (btnSimPause) {
