@@ -705,7 +705,12 @@ async def run_pipeline(
 
     # --- Step 9: Validation ---
     t1 = time.perf_counter()
-    ok, reason = validate(decision, config)
+    recent_bot_texts = [
+        bm.response_text
+        for bm in recent_bot_mem_for_activity
+        if getattr(bm, "response_text", None)
+    ]
+    ok, reason = validate(decision, config, recent_bot_texts=recent_bot_texts)
     result.steps.append(StepResult(
         name="validation",
         duration_ms=int((time.perf_counter() - t1) * 1000),
