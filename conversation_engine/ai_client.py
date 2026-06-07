@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -133,6 +134,13 @@ class GrokAiClient:
         )
 
     async def _call(self, model: str, prompt: str, system: str | None, cache_key: str, temperature: float = 0.2) -> AiCallResult:
+        # Master switch: when the cloud "brain" is disabled, every OpenRouter call
+        # (perception, decision, reflection, feedback scoring) short-circuits here and
+        # makes no HTTP request at all. This is the single chokepoint, so no call site
+        # can leak paid traffic in local-only mode.
+        if not getattr(self.config, "cloud_brain_enabled", True):
+            return AiCallResult(text="", latency_ms=0, tokens_used=0)
+
         started = time.perf_counter()
         messages = []
         if system:
@@ -147,10 +155,6 @@ class GrokAiClient:
                 "messages": messages,
                 "max_tokens": self.config.ai.max_output_tokens,
                 "temperature": temperature,
-                # All prompts demand a single JSON object. Asking the provider to
-                # enforce JSON output cuts down on markdown fences / leaked prose
-                # (notably from DeepSeek) that would otherwise need salvaging.
-                "response_format": {"type": "json_object"},
             },
         )
         response.raise_for_status()
@@ -311,11 +315,36 @@ def parse_perception(text: str) -> PerceptionDecision:
     return PerceptionDecision.model_validate_json(extract_json_object(text))
 
 
+_LEAKED_JSON_TAIL = re.compile(
+    r"""['"]?\s*,?\s*['"]?(?:reply_to_message_id|reply_to_user_id|target_message_id|"""
+    r"""topic|reasoning|plan|confidence|should_respond|tone_calibration|stances|"""
+    r"""semantic_risk|annoying_reason|feedback_informed|updated_engagement_posture)['"]?\s*:.*$""",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _sanitize_response_text(value: object) -> str | None:
+    """Guard against malformed model output leaking JSON tails into the chat.
+
+    Seen in the wild: response_text ending up as
+    "another one 😭','reply_to_message_id':156," — i.e. the model emitted broken
+    JSON and the value swallowed following keys. Cut anything from a leaked
+    key onward, and drop a value that is obviously a raw JSON fragment.
+    """
+    if not isinstance(value, str):
+        return value if value is None else str(value)
+    cleaned = _LEAKED_JSON_TAIL.sub("", value).strip()
+    # Trailing lone quote/comma left after the cut.
+    cleaned = cleaned.rstrip("'\" ,")
+    return cleaned or None
+
+
 def parse_response_decision(text: str) -> ResponseDecision:
     payload = json.loads(extract_json_object(text))
     confidence = payload.get("confidence")
     if isinstance(confidence, (int, float)) and confidence > 1:
         payload["confidence"] = min(float(confidence) / 100, 1.0)
+    payload["response_text"] = _sanitize_response_text(payload.get("response_text"))
     if payload.get("response_text") == "":
         payload["response_text"] = None
     if not isinstance(payload.get("semantic_risk"), str):
@@ -339,7 +368,16 @@ def parse_response_decision(text: str) -> ResponseDecision:
 
 
 def parse_context_summary(text: str) -> ContextSummary:
-    payload = json.loads(extract_json_object(text))
+    # The perception step is optional enrichment: it only *adds* compressed
+    # context for the decision model. If the model returns no parseable JSON
+    # (some providers occasionally emit empty/prose-only output), degrade to an
+    # empty summary so the cycle proceeds instead of crashing.
+    try:
+        payload = json.loads(extract_json_object(text))
+    except (ValueError, json.JSONDecodeError):
+        return ContextSummary(relevant_context=False)
+    if not isinstance(payload, dict):
+        return ContextSummary(relevant_context=False)
     payload["relevant_context"] = _coerce_bool(payload.get("relevant_context"))
     if not isinstance(payload.get("summary"), str):
         payload["summary"] = str(payload.get("summary") or "")

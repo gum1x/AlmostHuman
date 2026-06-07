@@ -48,7 +48,8 @@ async def bootstrap_chat(
                     bot_user_id=bot_user_id,
                     prompt_version=config.ai.prompt_version,
                 )
-            if backfilled >= 50:
+            # Self-reflection is an OpenRouter call — skip at bootstrap in local-only mode.
+            if backfilled >= 50 and getattr(config, "cloud_brain_enabled", True):
                 await run_self_reflection(
                     chat_id=chat_id,
                     memory=memory,
