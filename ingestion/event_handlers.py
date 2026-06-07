@@ -158,11 +158,37 @@ def _msg_to_raw_dict(msg, chat_type: str | None = None) -> dict:
         return {}
 
 
+def _should_drop_message(text: str | None, sender_info: SenderInfo | None) -> str | None:
+    """Return a reason string if this message should never be ingested, else None.
+
+    Drops (so they never reach the DB or the conversation engine):
+    - commands / bot syntax: any message whose first non-space char is "/"
+    - bots: Telegram bot flag set, or username ending in "bot" (covers userbots
+      and command bots like @some_bot whose `bot` flag we can't always trust)
+    """
+    if sender_info:
+        if sender_info.is_bot:
+            return "sender_is_bot"
+        uname = (sender_info.username or "").strip().lower()
+        if uname.endswith("bot"):
+            return "sender_username_endswith_bot"
+    if text and text.lstrip().startswith("/"):
+        return "slash_command"
+    return None
+
+
 async def _produce_new_message(event, producer: QueueProducer, chat_type: str) -> None:
     msg = event.message
     sender_info = await _get_sender_info(event)
 
-    if sender_info and sender_info.is_bot:
+    drop_reason = _should_drop_message(msg.text, sender_info)
+    if drop_reason:
+        await log.adebug(
+            "message_dropped_pre_ingest",
+            reason=drop_reason,
+            message_id=msg.id,
+            chat_id=msg.chat_id,
+        )
         return
 
     ts = msg.date
