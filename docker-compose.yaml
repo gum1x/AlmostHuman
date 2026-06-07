@@ -116,17 +116,30 @@ services:
       # Hybrid mode: smart model (Grok) for cognition/decisions/plan, local for phrasing.
       # Set these two for reliable operation from inside the container (http server on host).
       LOCAL_INFERENCE_MODE: ${LOCAL_INFERENCE_MODE:-http}
-      LOCAL_INFERENCE_URL: ${LOCAL_INFERENCE_URL:-http://172.17.0.1:8765/generate}
+      # Reach the host's voice shim via host.docker.internal (mapped to host-gateway below),
+      # which resolves correctly regardless of which bridge network the container is on.
+      LOCAL_INFERENCE_URL: ${LOCAL_INFERENCE_URL:-http://host.docker.internal:8765/generate}
+      VOICE_MODE: ${VOICE_MODE:-standalone}
+      # Cloud "brain" master switch (OpenRouter perception+decision+reflection). false =
+      # fully local: timing classifier decides when, voice model writes what.
+      CLOUD_BRAIN_ENABLED: ${CLOUD_BRAIN_ENABLED:-true}
+      # Timing classifier pre-gate (decides WHEN to respond).
+      TIMING_CLASSIFIER_ENABLED: ${TIMING_CLASSIFIER_ENABLED:-false}
+      TIMING_CLASSIFIER_MODEL_PATH: ${TIMING_CLASSIFIER_MODEL_PATH:-models/timing_classifier.json}
+      TIMING_CLASSIFIER_THRESHOLD: ${TIMING_CLASSIFIER_THRESHOLD:-0.0}
       WORKER_POOL_SIZE: ${WORKER_POOL_SIZE:-5}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./sessions:/app/sessions
       - ./config.toml:/app/config.toml:ro
+      # Timing classifier weights (gitignored / dockerignored as data) — mount read-only
+      # so the engine can update the model without an image rebuild.
+      - ./models:/app/models:ro
       # Mount your local model dir from the VPS host.
       # Set LOCAL_STYLE_MOUNT_HOST on the host or in .env to override (default assumes user "x").
       - ${LOCAL_STYLE_MOUNT_HOST:-/home/USER/telegram-style-ai}:/home/USER/telegram-style-ai:ro
-      # If your local LLM server runs on the host and you need to reach it from inside the container,
-      # you may need an extra_hosts or use the host IP (e.g. 172.17.0.1 on Docker Linux).
     depends_on:
       migrate:
         condition: service_completed_successfully
