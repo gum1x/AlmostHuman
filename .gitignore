@@ -27,6 +27,10 @@ client_secret*.json
 # tests/style_matching/*.jsonl
 # tests/style_matching/*.md
 
+# Large training datasets (rebuildable from chat exports via scripts/) — do not commit
+data/*.jsonl
+scripts/voice_candidates.json
+
 # VPS / deployment
 .env.vps
 .env.local
