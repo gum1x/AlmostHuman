@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import signal
 from dataclasses import dataclass
@@ -8,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from conversation_engine.ai_client import (
+    AiCallResult,
     FakeAiClient,
     GrokAiClient,
     ResponseDecision,
@@ -39,6 +41,7 @@ from conversation_engine.persona_engine import (
 )
 from conversation_engine.prompts import build_context_summary_prompt, build_response_decision_prompt
 from conversation_engine.sender import TelegramSender
+from conversation_engine.timing_classifier import TimingClassifier
 from conversation_engine.validators import validate
 from core.logging import get_logger, setup_logging
 from storage.database import async_session_factory, dispose_engine
@@ -107,6 +110,23 @@ class ConversationScheduler:
         self.bot_user_id = bot_user_id
         self.bot_username = bot_username.lower() if bot_username else None
         self.style_rewriter = LocalStyleRewriter(config)
+        self.timing_classifier = None
+        if getattr(config, "timing_classifier_enabled", False):
+            tc = TimingClassifier(model_path=config.timing_classifier_model_path)
+            # Optional threshold override from config (0 = keep the model's own).
+            if config.timing_classifier_threshold and config.timing_classifier_threshold > 0:
+                tc.threshold = config.timing_classifier_threshold
+            self.timing_classifier = tc
+        # In local-only mode the timing classifier is the ONLY thing deciding when to
+        # speak. Without it, the bot would reply to everything that clears the basic
+        # engagement gate — warn loudly so this misconfig is visible.
+        if not getattr(config, "cloud_brain_enabled", True) and self.timing_classifier is None:
+            log.warning(
+                "local_only_without_timing_classifier",
+                detail="cloud_brain_enabled=false but timing classifier is off; bot will "
+                "respond to everything that passes the engagement gate. Enable "
+                "TIMING_CLASSIFIER_ENABLED to control response rate.",
+            )
         self._shutdown = asyncio.Event()
 
     def shutdown(self) -> None:
@@ -157,6 +177,9 @@ class ConversationScheduler:
 
     async def _run_reflections_if_needed(self, chat_id: int, is_private_dm: bool) -> None:
         if is_private_dm:
+            return
+        # Self/meta reflection are OpenRouter calls — skip them entirely in local-only mode.
+        if not getattr(self.config, "cloud_brain_enabled", True):
             return
         async with async_session_factory() as session:
             async with session.begin():
@@ -303,6 +326,59 @@ class ConversationScheduler:
             if self._mentions_bot(txt) or target_for_direct.reply_to_message_id in bot_sent_ids:
                 is_direct_for_gate = True
 
+        # Timing classifier pre-gate (advisor's Part 2): cheaply decide whether this
+        # incoming message realistically earns a reply BEFORE spending paid LLM calls.
+        # Direct mentions / replies-to-bot / DMs always bypass it (we always engage those).
+        if (
+            self.timing_classifier is not None
+            and not is_private_dm
+            and not is_direct_for_gate
+            and target_for_direct is not None
+        ):
+            t_txt = target_for_direct.cleaned_text or target_for_direct.text or ""
+            is_reply = target_for_direct.reply_to_message_id is not None
+            reply_to_regular = (
+                is_reply and target_for_direct.reply_to_message_id in bot_sent_ids
+            )
+            ts = self.timing_classifier.score(
+                text=t_txt,
+                is_reply=is_reply,
+                reply_to_regular=reply_to_regular,
+                sender_is_regular=True,
+                idx_gap_since_sender=-1,
+            )
+            if not ts.passes:
+                await memory.insert_ai_decision(
+                    chat_id=chat_id,
+                    prompt_version=self.config.ai.prompt_version,
+                    snapshot_message_id=snapshot_message_id,
+                    new_message_count=new_message_count,
+                    should_respond=False,
+                    confidence=round(ts.score, 3),
+                    response_text=None,
+                    reply_to_message_id=None,
+                    reasoning=(
+                        f"timing_classifier skip: p={ts.score:.3f} < thr="
+                        f"{self.timing_classifier.threshold:.2f} "
+                        f"(botlike={ts.is_botlike})"
+                    ),
+                    gate_score=gate.gate_score,
+                    gate_factors={**gate.gate_factors, "timing_p": round(ts.score, 3)},
+                    request1_latency_ms=0,
+                    request1_tokens_used=0,
+                    request2_tokens_used=0,
+                )
+                await log.ainfo(
+                    "timing_classifier_skip",
+                    chat_id=chat_id,
+                    p=round(ts.score, 3),
+                    threshold=self.timing_classifier.threshold,
+                    botlike=ts.is_botlike,
+                    message_id=getattr(target_for_direct, "message_id", None),
+                )
+                await memory.record_cycle_success(chat_id)
+                return self._backoff_interval(previous_interval)
+
         if not is_private_dm and not gate.should_proceed:
             if is_direct_for_gate:
                 gate = GateResult(
@@ -398,6 +474,12 @@ class ConversationScheduler:
         )
 
     async def _execute_llm(self, prep: _CyclePrep) -> _CycleLlmOutcome:
+        # Local-only mode: the OpenRouter "brain" (perception + decision) is turned off.
+        # The timing classifier already decided this message is worth a reply (it passed
+        # the pre-gate), so we skip both paid calls and let the voice model write the words.
+        if not getattr(self.config, "cloud_brain_enabled", True):
+            return await self._execute_local_only(prep)
+
         context = prep.context
         summary_prompt, summary_system = build_context_summary_prompt(
             context,
@@ -450,19 +532,40 @@ class ConversationScheduler:
             self.config,
         )
         request2 = await self.ai_client.call_decision_model(decision_prompt, decision_system)
-        decision = parse_response_decision(request2.text)
+        try:
+            decision = parse_response_decision(request2.text)
+        except (ValueError, json.JSONDecodeError) as exc:
+            # Malformed/empty decision output => don't respond this cycle rather
+            # than crash. (Some providers occasionally return non-JSON.)
+            await log.awarning(
+                "decision_parse_failed",
+                chat_id=prep.chat_id,
+                error=str(exc),
+                raw_preview=(request2.text or "")[:200],
+            )
+            decision = ResponseDecision(should_respond=False, reasoning="decision_parse_failed")
 
         if decision.should_respond and self.style_rewriter.enabled:
-            plan_signal = (decision.plan or decision.reasoning or "").strip()
-            if plan_signal:
-                phrased = await self.style_rewriter.phrase(
+            if getattr(self.config, "voice_mode", "standalone") == "standalone":
+                # New: single-voice model trained on raw (context -> reply) pairs writes
+                # the words itself. The smart model already decided WHETHER to speak.
+                voiced = await self.style_rewriter.generate_voice(
                     context=prep.raw_context or "",
-                    plan=plan_signal,
-                    target_message="",
-                    tone=decision.tone_calibration or "",
                 )
-                if phrased and phrased.strip():
-                    decision.response_text = phrased
+                if voiced and voiced.strip():
+                    decision.response_text = voiced
+            else:
+                # Legacy: smart model emits a plan; local model phrases it.
+                plan_signal = (decision.plan or decision.reasoning or "").strip()
+                if plan_signal:
+                    phrased = await self.style_rewriter.phrase(
+                        context=prep.raw_context or "",
+                        plan=plan_signal,
+                        target_message="",
+                        tone=decision.tone_calibration or "",
+                    )
+                    if phrased and phrased.strip():
+                        decision.response_text = phrased
 
         recent_bot_texts = [
             bm.response_text for bm in prep.recent_bot_mem if getattr(bm, "response_text", None)
@@ -482,6 +585,70 @@ class ConversationScheduler:
             decision=decision,
             request1=request1,
             request2=request2,
+            posture=prep.posture,
+            ok=ok,
+            reason=reason,
+        )
+
+    async def _execute_local_only(self, prep: _CyclePrep) -> _CycleLlmOutcome:
+        """Local-only path used when the cloud brain (OpenRouter) is disabled.
+
+        No paid perception/decision calls. The timing classifier already approved this
+        cycle, so we mark should_respond=True and let the voice model write the reply
+        straight from raw context. The same validators + social-safety checks still run.
+        """
+        zero = AiCallResult(text="", latency_ms=0, tokens_used=0)
+        target = select_target_message(prep.enriched)
+        reply_to_id = getattr(target, "message_id", None)
+        reply_to_user = getattr(target, "sender_id", None)
+
+        decision = ResponseDecision(
+            should_respond=True,
+            confidence=0.5,
+            reply_to_message_id=reply_to_id,
+            reply_to_user_id=reply_to_user,
+            target_message_id=reply_to_id,
+            reasoning="local_only_mode: timing classifier approved, voice model writing reply",
+        )
+
+        if self.style_rewriter.enabled:
+            voiced = await self.style_rewriter.generate_voice(context=prep.raw_context or "")
+            if voiced and voiced.strip():
+                decision.response_text = voiced
+            else:
+                # Voice model produced nothing — don't send an empty message.
+                decision.should_respond = False
+                decision.reasoning = "local_only_mode: voice model returned empty"
+        else:
+            decision.should_respond = False
+            decision.reasoning = "local_only_mode: style_rewriter disabled (no local voice available)"
+
+        recent_bot_texts = [
+            bm.response_text for bm in prep.recent_bot_mem if getattr(bm, "response_text", None)
+        ]
+        ok, reason = validate(decision, self.config, recent_bot_texts=recent_bot_texts)
+        if ok:
+            ok, reason = self._passes_social_safety(
+                is_private_dm=prep.is_private_dm,
+                active_bot_thread=prep.active_bot_thread,
+                enriched=prep.enriched,
+                brief=prep.brief,
+                decision=decision,
+                bot_sent_ids=prep.bot_sent_ids,
+            )
+
+        await log.ainfo(
+            "local_only_cycle",
+            chat_id=prep.chat_id,
+            ok=ok,
+            reason=reason if not ok else "",
+            has_text=bool(decision.response_text),
+        )
+
+        return _CycleLlmOutcome(
+            decision=decision,
+            request1=zero,
+            request2=zero,
             posture=prep.posture,
             ok=ok,
             reason=reason,

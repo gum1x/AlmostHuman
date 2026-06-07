@@ -109,6 +109,24 @@ class EngineConfig:
     use_local_model_for_responses: bool = False  # Legacy flag (no longer used). Hybrid is now the default: smart model (Grok) for decisions+plan, local for phrasing when LOCAL_STYLE_REWRITE_ENABLED + http mode configured.
     local_inference_mode: str = "subprocess"  # "subprocess" or "http" — http is required for VPS (container calls host inference server)
     local_inference_url: str = ""  # e.g. http://172.17.0.1:8765/generate . Required for http mode.
+    # "standalone" = new advisor-format voice model: send raw context only, model writes the
+    # reply (single cloned regular). "phrase" = legacy: smart model emits a plan, local model
+    # renders it. Must match how the local model was trained (build_voice_training.py = standalone).
+    voice_mode: str = "standalone"
+    emoji_window: int = 5  # if any of the last (emoji_window - 1) bot msgs had an emoji, strip emojis from this one (0 disables)
+    # Timing classifier (advisor's Part 2): a cheap, data-trained pre-gate that scores the
+    # incoming message ("would a regular bother to reply?") and skips the expensive LLM
+    # perception+decision calls below threshold. Enforces the realistic ~6% response rate
+    # and cuts paid API calls. See conversation_engine/timing_classifier.py.
+    timing_classifier_enabled: bool = False
+    timing_classifier_model_path: str = "models/timing_classifier.json"
+    timing_classifier_threshold: float = 0.0  # 0 = use the model's chosen_threshold
+    # Cloud "brain" = the OpenRouter perception + decision LLM calls ("what kind of
+    # situation is this? / what does someone like me do here?"). When False, the engine
+    # skips BOTH paid calls and falls back to local-only mode: the timing classifier
+    # decides WHEN to respond and the voice model writes WHAT. Turn off to stop OpenRouter
+    # usage entirely (e.g. during rate-limit / billing issues) and run fully local.
+    cloud_brain_enabled: bool = True
 
 
 def _section(data: dict[str, Any], name: str) -> dict[str, Any]:
@@ -143,6 +161,12 @@ def load_engine_config(path: str | Path = "config.toml") -> EngineConfig:
         use_local_model_for_responses=os.getenv("USE_LOCAL_MODEL_FOR_RESPONSES", "false").lower() == "true",
         local_inference_mode=os.getenv("LOCAL_INFERENCE_MODE", "subprocess").lower(),
         local_inference_url=os.getenv("LOCAL_INFERENCE_URL", ""),
+        voice_mode=os.getenv("VOICE_MODE", "standalone").lower(),
+        emoji_window=int(os.getenv("EMOJI_WINDOW", "5")),
+        timing_classifier_enabled=os.getenv("TIMING_CLASSIFIER_ENABLED", "false").lower() == "true",
+        timing_classifier_model_path=os.getenv("TIMING_CLASSIFIER_MODEL_PATH", "models/timing_classifier.json"),
+        timing_classifier_threshold=float(os.getenv("TIMING_CLASSIFIER_THRESHOLD", "0.0")),
+        cloud_brain_enabled=os.getenv("CLOUD_BRAIN_ENABLED", "true").lower() == "true",
         persona=PersonaConfig(**_section(raw, "persona")),
         ai=AiConfig(**_section(raw, "ai")),
         prompt=PromptConfig(**_section(raw, "prompt")),
