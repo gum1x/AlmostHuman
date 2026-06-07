@@ -47,6 +47,31 @@ class LocalStyleRewriter:
         prompt = self._build_generation_prompt(context=context, incoming_message=incoming_message)
         return await self._run_local_model(prompt, log_event="local_direct_response")
 
+    # System message MUST match scripts/build_voice_training.py::SYSTEM_MSG and
+    # scripts/voice_generate_shim.py::VOICE_SYSTEM exactly, so the served prompt
+    # matches what the model was fine-tuned on (train==serve).
+    VOICE_SYSTEM = (
+        "You are an active member of a crypto/Telegram handle-trading group chat. "
+        "Reply naturally: short, casual, lowercase, blunt. Typos are fine. "
+        "Most replies are 1-6 words. Keep the energy of the chat. "
+        "Output only your message, nothing else."
+    )
+
+    async def generate_voice(self, *, context: str) -> str:
+        """Standalone-generator path (advisor's format): the fine-tuned voice model
+        receives ONLY the raw recent context (formatted "uXXXX: text" lines) and
+        produces the reply itself. No plan/intent signal — the model trained on a
+        single regular's real (context -> reply) pairs handles voice end to end.
+
+        This matches scripts/build_voice_training.py: system=VOICE_SYSTEM,
+        user=<context block>, assistant=<reply>. The smart decision model still
+        decides WHETHER to speak; this only decides the WORDS.
+        """
+        if not self.enabled or not context.strip():
+            return ""
+        prompt = self._build_voice_prompt(context=context)
+        return await self._run_local_model(prompt, log_event="local_voice_generate")
+
     async def phrase(self, *, context: str, plan: str, target_message: str = "", tone: str = "") -> str:
         """Core hybrid path: local fine-tuned model phrases the actual reply text.
 
@@ -140,6 +165,19 @@ class LocalStyleRewriter:
         if text:
             await log.ainfo(log_event + "_applied")
         return text or ""
+
+    def _build_voice_prompt(self, *, context: str) -> str:
+        """Return ONLY the recent-context block, matching the training `user` field in
+        scripts/build_voice_training.py (which is the raw "uXXXX: text" lines, nothing
+        appended). The inference server / chat.py applies the chat template with
+        VOICE_SYSTEM, reproducing the exact training shape so the model isn't asked
+        for something it never saw. Trim to the recent window the model was trained on
+        (~12 short msgs); keep the tail since the latest messages matter most.
+        """
+        ctx = (context or "").strip()
+        # Keep the most recent lines; training contexts were ~12 messages.
+        lines = [ln for ln in ctx.splitlines() if ln.strip()]
+        return "\n".join(lines[-14:]) if lines else ctx
 
     def _build_generation_prompt(self, *, context: str, incoming_message: str) -> str:
         context_excerpt = context[-2500:] if context else "No recent context."
