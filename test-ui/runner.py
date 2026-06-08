@@ -696,6 +696,8 @@ async def run_pipeline(
         ))
         result.decision["validated"] = ok
         result.decision["validation_reason"] = reason
+        if ok and decision.response_text:
+            result.response_text = decision.response_text
         result.total_duration_ms = int((time.perf_counter() - t0) * 1000)
         return result
 
