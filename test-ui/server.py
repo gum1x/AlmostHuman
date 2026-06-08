@@ -31,6 +31,8 @@ for p in (str(PROJECT_ROOT), str(TEST_UI_DIR)):
     if p not in sys.path:
         sys.path.insert(0, p)
 
+from dotenv import load_dotenv
+
 from conversation_engine.config import load_engine_config
 from runner import run_pipeline, PipelineResult, StepResult, TUNABLE_META, READONLY_SIGNALS
 
@@ -45,14 +47,18 @@ _chats: dict[str, list[dict[str, Any]]] = {}
 # Previous bot memories (posture, responses, reasoning) for carry-over across turns
 # and for re-runs with different overrides on the same chat snapshot.
 _bot_mems: dict[str, list[dict[str, Any]]] = {}
-_config = None
-
-
 def _get_config():
-    global _config
-    if _config is None:
-        _config = load_engine_config(PROJECT_ROOT / "config.toml")
-    return _config
+    # Re-read on every request (cheap: a TOML parse + dotenv) so the test-UI always
+    # reflects the live .env — e.g. flipping CLOUD_BRAIN_ENABLED / TIMING_CLASSIFIER_*
+    # takes effect without restarting the server. (Previously cached once, which left
+    # the UI stuck on a stale config after the .env changed.)
+    #
+    # override=True makes the .env file authoritative even if the server process
+    # inherited a stale value for the same var in its shell environment. This is safe
+    # here because the test-UI runs on the host where .env is the single source of
+    # truth (the containerized engine, by contrast, gets its vars from compose).
+    load_dotenv(PROJECT_ROOT / ".env", override=True)
+    return load_engine_config(PROJECT_ROOT / "config.toml")
 
 
 def _get_local_ip() -> str:
