@@ -549,9 +549,10 @@ class ConversationScheduler:
             if getattr(self.config, "voice_mode", "standalone") == "standalone":
                 # New: single-voice model trained on raw (context -> reply) pairs writes
                 # the words itself. The smart model already decided WHETHER to speak.
-                voiced = await self.style_rewriter.generate_voice(
-                    context=prep.raw_context or "",
-                )
+                # Feed clean "uXXX: text" lines (train==serve), NOT the rich smart-model
+                # context which has persona/signal blocks the voice model never saw.
+                voice_ctx = self.style_rewriter.build_voice_context(prep.enriched)
+                voiced = await self.style_rewriter.generate_voice(context=voice_ctx)
                 if voiced and voiced.strip():
                     decision.response_text = voiced
             else:
@@ -616,7 +617,9 @@ class ConversationScheduler:
         )
 
         if self.style_rewriter.enabled:
-            voiced = await self.style_rewriter.generate_voice(context=prep.raw_context or "")
+            # Clean "uXXX: text" lines (train==serve), not the rich smart-model context.
+            voice_ctx = self.style_rewriter.build_voice_context(prep.enriched)
+            voiced = await self.style_rewriter.generate_voice(context=voice_ctx)
             if voiced and voiced.strip():
                 decision.response_text = voiced
             else:
