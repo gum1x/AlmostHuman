@@ -418,6 +418,49 @@ async def run_pipeline(
         result.total_duration_ms = int((time.perf_counter() - t0) * 1000)
         return result
 
+    # --- Step 4b: Timing classifier pre-gate (mirrors production scheduler) ---
+    # When enabled, this is the data-trained "would a regular bother to reply?" filter
+    # that runs before any LLM call. Matches conversation_engine/scheduler.py.
+    if getattr(config, "timing_classifier_enabled", False):
+        t1 = time.perf_counter()
+        target_tc = None
+        for m in reversed(enriched):
+            if (m.cleaned_text or m.text or "").strip():
+                target_tc = m
+                break
+        if target_tc is not None:
+            from conversation_engine.timing_classifier import TimingClassifier
+            tc = TimingClassifier(model_path=config.timing_classifier_model_path)
+            if config.timing_classifier_threshold and config.timing_classifier_threshold > 0:
+                tc.threshold = config.timing_classifier_threshold
+            t_txt = target_tc.cleaned_text or target_tc.text or ""
+            ts = tc.score(
+                text=t_txt,
+                is_reply=target_tc.reply_to_message_id is not None,
+                reply_to_regular=False,
+                sender_is_regular=True,
+                idx_gap_since_sender=-1,
+            )
+            result.steps.append(StepResult(
+                name="timing_classifier",
+                duration_ms=int((time.perf_counter() - t1) * 1000),
+                data={
+                    "enabled": True,
+                    "p": round(ts.score, 3),
+                    "threshold": tc.threshold,
+                    "passes": ts.passes,
+                    "is_botlike": ts.is_botlike,
+                    "target_text": t_txt[:120],
+                },
+            ))
+            if not ts.passes:
+                result.steps.append(StepResult(
+                    name="blocked",
+                    data={"reason": "timing_classifier_skip", "p": round(ts.score, 3), "threshold": tc.threshold},
+                ))
+                result.total_duration_ms = int((time.perf_counter() - t0) * 1000)
+                return result
+
     # --- Step 5: Slim activity numbers (high-value counts only) + overrides ---
     # The decision model uses the qualitative three-question prompt. We compute/pass the kept
     # raw counts (responses_last_hour tracker, time_since, is_reply_to_bot + direct_mention checks)
@@ -575,6 +618,87 @@ async def run_pipeline(
         },
     ))
 
+    # --- Local-only mode: cloud brain (OpenRouter) disabled ---
+    # Mirrors conversation_engine/scheduler.py::_execute_local_only. No perception/
+    # decision LLM calls: the timing classifier already approved this cycle, so we
+    # mark should_respond=True and let the voice model write the reply.
+    if not getattr(config, "cloud_brain_enabled", True):
+        raw_context = context.context
+        target_lo = None
+        for m in reversed(enriched):
+            if (m.cleaned_text or m.text or "").strip():
+                target_lo = m
+                break
+        # Confidence above ai.min_confidence_to_send (timing classifier already approved).
+        local_conf = max(0.7, float(config.ai.min_confidence_to_send) + 0.05)
+        decision = ResponseDecision(
+            should_respond=True,
+            confidence=local_conf,
+            reply_to_message_id=getattr(target_lo, "message_id", None),
+            reply_to_user_id=getattr(target_lo, "sender_id", None),
+            target_message_id=getattr(target_lo, "message_id", None),
+            reasoning="local_only_mode: timing classifier approved, voice model writing reply",
+        )
+        result.steps.append(StepResult(
+            name="decision",
+            duration_ms=0,
+            data={**decision.model_dump(), "mode": "local_only (cloud_brain disabled)", "tokens_used": 0},
+        ))
+        result.decision = decision.model_dump()
+
+        style_rewriter = LocalStyleRewriter(config)
+        if style_rewriter.enabled:
+            t1 = time.perf_counter()
+            try:
+                voiced = await style_rewriter.generate_voice(context=raw_context or "")
+                voiced_text = (voiced or "").strip()
+                result.steps.append(StepResult(
+                    name="voice_generate",
+                    duration_ms=int((time.perf_counter() - t1) * 1000),
+                    data={
+                        "enabled": True,
+                        "mode": "standalone",
+                        "voiced_text": voiced_text[:200],
+                        "used": bool(voiced_text),
+                    },
+                ))
+                if voiced_text:
+                    decision.response_text = voiced_text
+                    result.decision["response_text"] = voiced_text
+                else:
+                    decision.should_respond = False
+            except Exception as exc:
+                result.steps.append(StepResult(
+                    name="voice_generate",
+                    duration_ms=int((time.perf_counter() - t1) * 1000),
+                    error=str(exc),
+                ))
+                decision.should_respond = False
+        else:
+            result.steps.append(StepResult(
+                name="voice_generate",
+                duration_ms=0,
+                data={"enabled": False, "skipped": "style_rewriter disabled"},
+            ))
+            decision.should_respond = False
+
+        # Same validators production runs.
+        recent_bot_texts = [
+            (m or {}).get("response_text") for m in (previous_bot_memories or [])
+            if (m or {}).get("response_text")
+        ]
+        ok, reason = validate(decision, config, recent_bot_texts=recent_bot_texts)
+        result.steps.append(StepResult(
+            name="validation",
+            duration_ms=0,
+            data={"ok": ok, "reason": reason if not ok else "passed",
+                  "final_text": decision.response_text if ok else None},
+        ))
+        result.decision["validated"] = ok
+        result.decision["validation_reason"] = reason
+        result.total_duration_ms = int((time.perf_counter() - t0) * 1000)
+        return result
+
     # --- Step 6: AI Perception ---
     if use_real_ai and config.xai_api_key:
         ai_client = GrokAiClient(config)
@@ -651,35 +775,31 @@ async def run_pipeline(
         result.total_duration_ms = int((time.perf_counter() - t0) * 1000)
         return result
 
-    # --- Step 8: Local Style Rewriter ---
+    # --- Step 8: Local voice / phrasing (matches scheduler.py::_execute_llm) ---
+    # voice_mode=standalone (production default): the voice model writes the reply from
+    # raw context. voice_mode=phrase (legacy): smart model emits a plan, local renders it.
     style_rewriter = LocalStyleRewriter(config)
+    voice_mode = getattr(config, "voice_mode", "standalone")
     if decision.should_respond and style_rewriter.enabled:
         t1 = time.perf_counter()
-        plan_signal = (decision.plan or decision.reasoning or "").strip()
-        if plan_signal:
+        if voice_mode == "standalone":
             try:
-                phrased = await style_rewriter.phrase(
-                    context=raw_context or "",
-                    plan=plan_signal,
-                    target_message="",
-                    tone=decision.tone_calibration or "",
-                )
-                phrased_text = (phrased or "").strip()
+                voiced = await style_rewriter.generate_voice(context=raw_context or "")
+                voiced_text = (voiced or "").strip()
                 result.steps.append(StepResult(
                     name="style_rewriter",
                     duration_ms=int((time.perf_counter() - t1) * 1000),
                     data={
                         "enabled": True,
-                        "plan": plan_signal[:200],
-                        "tone": decision.tone_calibration or "",
+                        "mode": "standalone",
                         "original_text": (decision.response_text or "")[:200],
-                        "phrased_text": phrased_text[:200],
-                        "used_phrased": bool(phrased_text),
+                        "voiced_text": voiced_text[:200],
+                        "used": bool(voiced_text),
                     },
                 ))
-                if phrased_text:
-                    decision.response_text = phrased_text
-                    result.decision["response_text"] = phrased_text
+                if voiced_text:
+                    decision.response_text = voiced_text
+                    result.decision["response_text"] = voiced_text
                     result.decision["style_rewriter_applied"] = True
             except Exception as exc:
                 result.steps.append(StepResult(
@@ -688,11 +808,45 @@ async def run_pipeline(
                     error=str(exc),
                 ))
         else:
-            result.steps.append(StepResult(
-                name="style_rewriter",
-                duration_ms=0,
-                data={"enabled": True, "skipped": "no plan signal from decision"},
-            ))
+            plan_signal = (decision.plan or decision.reasoning or "").strip()
+            if plan_signal:
+                try:
+                    phrased = await style_rewriter.phrase(
+                        context=raw_context or "",
+                        plan=plan_signal,
+                        target_message="",
+                        tone=decision.tone_calibration or "",
+                    )
+                    phrased_text = (phrased or "").strip()
+                    result.steps.append(StepResult(
+                        name="style_rewriter",
+                        duration_ms=int((time.perf_counter() - t1) * 1000),
+                        data={
+                            "enabled": True,
+                            "mode": "phrase",
+                            "plan": plan_signal[:200],
+                            "tone": decision.tone_calibration or "",
+                            "original_text": (decision.response_text or "")[:200],
+                            "phrased_text": phrased_text[:200],
+                            "used_phrased": bool(phrased_text),
+                        },
+                    ))
+                    if phrased_text:
+                        decision.response_text = phrased_text
+                        result.decision["response_text"] = phrased_text
+                        result.decision["style_rewriter_applied"] = True
+                except Exception as exc:
+                    result.steps.append(StepResult(
+                        name="style_rewriter",
+                        duration_ms=int((time.perf_counter() - t1) * 1000),
+                        error=str(exc),
+                    ))
+            else:
+                result.steps.append(StepResult(
+                    name="style_rewriter",
+                    duration_ms=0,
+                    data={"enabled": True, "mode": "phrase", "skipped": "no plan signal from decision"},
+                ))
     else:
         result.steps.append(StepResult(
             name="style_rewriter",
