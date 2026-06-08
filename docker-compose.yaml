@@ -116,9 +116,10 @@ services:
       # Hybrid mode: smart model (Grok) for cognition/decisions/plan, local for phrasing.
       # Set these two for reliable operation from inside the container (http server on host).
       LOCAL_INFERENCE_MODE: ${LOCAL_INFERENCE_MODE:-http}
-      # Reach the host's voice shim via host.docker.internal (mapped to host-gateway below),
-      # which resolves correctly regardless of which bridge network the container is on.
-      LOCAL_INFERENCE_URL: ${LOCAL_INFERENCE_URL:-http://host.docker.internal:8765/generate}
+      # Container reaches the host's voice shim via host.docker.internal (mapped to
+      # host-gateway below). Hardcoded (not from .env) so the host-side test-UI can keep
+      # .env's LOCAL_INFERENCE_URL pointed at localhost:8765 instead.
+      LOCAL_INFERENCE_URL: http://host.docker.internal:8765/generate
       VOICE_MODE: ${VOICE_MODE:-standalone}
       # Cloud "brain" master switch (OpenRouter perception+decision+reflection). false =
       # fully local: timing classifier decides when, voice model writes what.
