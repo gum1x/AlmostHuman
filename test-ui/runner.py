@@ -650,7 +650,9 @@ async def run_pipeline(
         if style_rewriter.enabled:
             t1 = time.perf_counter()
             try:
-                voiced = await style_rewriter.generate_voice(context=raw_context or "")
+                # Clean "uXXX: text" lines (train==serve), not the rich context.context.
+                voice_ctx = style_rewriter.build_voice_context(enriched)
+                voiced = await style_rewriter.generate_voice(context=voice_ctx)
                 voiced_text = (voiced or "").strip()
                 result.steps.append(StepResult(
                     name="voice_generate",
@@ -786,7 +788,9 @@ async def run_pipeline(
         t1 = time.perf_counter()
         if voice_mode == "standalone":
             try:
-                voiced = await style_rewriter.generate_voice(context=raw_context or "")
+                # Clean "uXXX: text" lines (train==serve), not the rich context.context.
+                voice_ctx = style_rewriter.build_voice_context(enriched)
+                voiced = await style_rewriter.generate_voice(context=voice_ctx)
                 voiced_text = (voiced or "").strip()
                 result.steps.append(StepResult(
                     name="style_rewriter",

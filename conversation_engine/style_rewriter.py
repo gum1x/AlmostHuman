@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 
 import httpx
 
@@ -57,6 +58,23 @@ class LocalStyleRewriter:
         "Output only your message, nothing else."
     )
 
+    @staticmethod
+    def build_voice_context(enriched_messages, max_lines: int = 14) -> str:
+        """Build the voice model's context EXACTLY as scripts/build_voice_training.py did:
+        raw "u<sender_id>: <text>" lines joined by newlines, most-recent last. This is the
+        single source of truth for train==serve on the voice path — pass the enriched
+        message list (not the smart-model context.context, which has persona/signal blocks
+        the voice model never saw and which wreck its output).
+        """
+        lines = []
+        for m in enriched_messages or []:
+            uid = getattr(m, "sender_id", None)
+            txt = (getattr(m, "cleaned_text", None) or getattr(m, "text", None) or "").strip()
+            if uid is None or not txt:
+                continue
+            lines.append(f"u{uid}: {txt}")
+        return "\n".join(lines[-max_lines:])
+
     async def generate_voice(self, *, context: str) -> str:
         """Standalone-generator path (advisor's format): the fine-tuned voice model
         receives ONLY the raw recent context (formatted "uXXXX: text" lines) and
@@ -66,6 +84,10 @@ class LocalStyleRewriter:
         This matches scripts/build_voice_training.py: system=VOICE_SYSTEM,
         user=<context block>, assistant=<reply>. The smart decision model still
         decides WHETHER to speak; this only decides the WORDS.
+
+        `context` should already be clean "uXXXX: text" lines (use build_voice_context()
+        to produce them from enriched messages). _build_voice_prompt() defensively strips
+        any non-chat scaffolding that slips through.
         """
         if not self.enabled or not context.strip():
             return ""
@@ -166,16 +188,28 @@ class LocalStyleRewriter:
             await log.ainfo(log_event + "_applied")
         return text or ""
 
+    # Training context lines are strictly "u<digits>: <text>" (build_voice_training.py).
+    # Anything else in the engine context (persona prose, "=== HEADERS ===", PRE-COMPUTED
+    # SIGNALS, posture lines) was NEVER seen at train time and pushes the model
+    # off-distribution into incoherent output, so we strip it here.
+    _VOICE_LINE_RE = re.compile(r"^u\d+:\s")
+
     def _build_voice_prompt(self, *, context: str) -> str:
-        """Return ONLY the recent-context block, matching the training `user` field in
-        scripts/build_voice_training.py (which is the raw "uXXXX: text" lines, nothing
-        appended). The inference server / chat.py applies the chat template with
-        VOICE_SYSTEM, reproducing the exact training shape so the model isn't asked
-        for something it never saw. Trim to the recent window the model was trained on
-        (~12 short msgs); keep the tail since the latest messages matter most.
+        """Return ONLY the raw "uXXXX: text" chat lines, matching the training `user`
+        field in scripts/build_voice_training.py (nothing appended, no persona/signal
+        blocks). The serve shim applies the chat template with VOICE_SYSTEM, reproducing
+        the exact training shape. Keep the tail (latest messages matter most).
         """
         ctx = (context or "").strip()
-        # Keep the most recent lines; training contexts were ~12 messages.
+        # Keep only genuine chat lines; drop engine scaffolding the voice model never saw.
+        chat_lines = [
+            ln.strip() for ln in ctx.splitlines()
+            if self._VOICE_LINE_RE.match(ln.strip())
+        ]
+        if chat_lines:
+            return "\n".join(chat_lines[-14:])
+        # Fallback: no uXXX-prefixed lines found (older context format) — use the tail
+        # of whatever we got rather than nothing.
         lines = [ln for ln in ctx.splitlines() if ln.strip()]
         return "\n".join(lines[-14:]) if lines else ctx
 
