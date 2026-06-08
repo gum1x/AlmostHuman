@@ -602,9 +602,13 @@ class ConversationScheduler:
         reply_to_id = getattr(target, "message_id", None)
         reply_to_user = getattr(target, "sender_id", None)
 
+        # Confidence is set above ai.min_confidence_to_send: the timing classifier
+        # already decided this message is worth a reply, so the validator's confidence
+        # floor (meant for the LLM decision path) shouldn't reject local-only replies.
+        local_conf = max(0.7, float(self.config.ai.min_confidence_to_send) + 0.05)
         decision = ResponseDecision(
             should_respond=True,
-            confidence=0.5,
+            confidence=local_conf,
             reply_to_message_id=reply_to_id,
             reply_to_user_id=reply_to_user,
             target_message_id=reply_to_id,
