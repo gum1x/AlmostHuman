@@ -59,7 +59,7 @@ class LocalStyleRewriter:
     )
 
     @staticmethod
-    def build_voice_context(enriched_messages, max_lines: int = 14) -> str:
+    def build_voice_context(enriched_messages, max_lines: int = 2) -> str:
         """Build the voice model's context EXACTLY as scripts/build_voice_training.py did:
         raw "u<sender_id>: <text>" lines joined by newlines, most-recent last. This is the
         single source of truth for train==serve on the voice path — pass the enriched
@@ -207,11 +207,11 @@ class LocalStyleRewriter:
             if self._VOICE_LINE_RE.match(ln.strip())
         ]
         if chat_lines:
-            return "\n".join(chat_lines[-14:])
+            return "\n".join(chat_lines[-2:])
         # Fallback: no uXXX-prefixed lines found (older context format) — use the tail
         # of whatever we got rather than nothing.
         lines = [ln for ln in ctx.splitlines() if ln.strip()]
-        return "\n".join(lines[-14:]) if lines else ctx
+        return "\n".join(lines[-2:]) if lines else ctx
 
     def _build_generation_prompt(self, *, context: str, incoming_message: str) -> str:
         context_excerpt = context[-2500:] if context else "No recent context."

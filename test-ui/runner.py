@@ -328,6 +328,9 @@ async def run_pipeline(
     result = PipelineResult(chat_id=chat_id)
     overrides = dict(overrides or {})
 
+    # Extract force_respond flag (bypass gate for testing voice model directly)
+    force_respond = overrides.pop("force_respond", False)
+
     # Extract gate-specific overrides (threshold for pre-filter; weights kept for power-user / API use
     # even though they are no longer primary dials in the UI — the 3Q model does not listen to gate internals).
     gate_weight_overrides: dict[str, float] = {}
@@ -413,53 +416,13 @@ async def run_pipeline(
         data=gate_data,
     ))
 
-    if not gate.should_proceed:
+    if not gate.should_proceed and not force_respond:
         result.steps.append(StepResult(name="blocked", data={"reason": "gate_blocked", "gate_score": gate.gate_score}))
         result.total_duration_ms = int((time.perf_counter() - t0) * 1000)
         return result
 
-    # --- Step 4b: Timing classifier pre-gate (mirrors production scheduler) ---
-    # When enabled, this is the data-trained "would a regular bother to reply?" filter
-    # that runs before any LLM call. Matches conversation_engine/scheduler.py.
-    if getattr(config, "timing_classifier_enabled", False):
-        t1 = time.perf_counter()
-        target_tc = None
-        for m in reversed(enriched):
-            if (m.cleaned_text or m.text or "").strip():
-                target_tc = m
-                break
-        if target_tc is not None:
-            from conversation_engine.timing_classifier import TimingClassifier
-            tc = TimingClassifier(model_path=config.timing_classifier_model_path)
-            if config.timing_classifier_threshold and config.timing_classifier_threshold > 0:
-                tc.threshold = config.timing_classifier_threshold
-            t_txt = target_tc.cleaned_text or target_tc.text or ""
-            ts = tc.score(
-                text=t_txt,
-                is_reply=target_tc.reply_to_message_id is not None,
-                reply_to_regular=False,
-                sender_is_regular=True,
-                idx_gap_since_sender=-1,
-            )
-            result.steps.append(StepResult(
-                name="timing_classifier",
-                duration_ms=int((time.perf_counter() - t1) * 1000),
-                data={
-                    "enabled": True,
-                    "p": round(ts.score, 3),
-                    "threshold": tc.threshold,
-                    "passes": ts.passes,
-                    "is_botlike": ts.is_botlike,
-                    "target_text": t_txt[:120],
-                },
-            ))
-            if not ts.passes:
-                result.steps.append(StepResult(
-                    name="blocked",
-                    data={"reason": "timing_classifier_skip", "p": round(ts.score, 3), "threshold": tc.threshold},
-                ))
-                result.total_duration_ms = int((time.perf_counter() - t0) * 1000)
-                return result
+    # Timing classifier intentionally removed from test-UI runner.
+    # It has no place in testing — use force_respond or the gate threshold slider instead.
 
     # --- Step 5: Slim activity numbers (high-value counts only) + overrides ---
     # The decision model uses the qualitative three-question prompt. We compute/pass the kept
@@ -667,7 +630,7 @@ async def run_pipeline(
                 if voiced_text:
                     decision.response_text = voiced_text
                     result.decision["response_text"] = voiced_text
-                else:
+                elif not force_respond:
                     decision.should_respond = False
             except Exception as exc:
                 result.steps.append(StepResult(
@@ -675,14 +638,16 @@ async def run_pipeline(
                     duration_ms=int((time.perf_counter() - t1) * 1000),
                     error=str(exc),
                 ))
-                decision.should_respond = False
+                if not force_respond:
+                    decision.should_respond = False
         else:
             result.steps.append(StepResult(
                 name="voice_generate",
                 duration_ms=0,
                 data={"enabled": False, "skipped": "style_rewriter disabled"},
             ))
-            decision.should_respond = False
+            if not force_respond:
+                decision.should_respond = False
 
         # Same validators production runs.
         recent_bot_texts = [
@@ -690,6 +655,10 @@ async def run_pipeline(
             if (m or {}).get("response_text")
         ]
         ok, reason = validate(decision, config, recent_bot_texts=recent_bot_texts)
+        # When force_respond is enabled, accept responses even if validation fails (testing voice model)
+        if force_respond and decision.response_text:
+            ok = True
+            reason = "force_respond (validation bypassed)"
         result.steps.append(StepResult(
             name="validation",
             duration_ms=0,
@@ -757,6 +726,9 @@ async def run_pipeline(
         decision_prompt, decision_system = build_response_decision_prompt(context, "", config)
         request2 = await ai_client.call_decision_model(decision_prompt, decision_system)
         decision = parse_response_decision(request2.text)
+        # When force_respond is enabled, override the model's decision (testing voice model)
+        if force_respond and not decision.should_respond:
+            decision.should_respond = True
         decision_data = decision.model_dump()
         result.steps.append(StepResult(
             name="decision",
