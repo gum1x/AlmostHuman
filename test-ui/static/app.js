@@ -798,7 +798,7 @@ async function playOneTurn(turn) {
     : null;
   const sender = turn ? (turn.sender_id || 999999) : 999999;
   try {
-    const body = { text: text, sender_id: sender };
+    const body = { text: text, sender_id: sender, overrides: { ...currentOverrides, force_respond: true } };
     if (liveReply != null) body.reply_to_message_id = liveReply;
     const res = await fetch(`/api/send/${encodeURIComponent(currentChat)}`, {
       method: 'POST',
