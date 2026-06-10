@@ -275,7 +275,9 @@ Do not invent relationships. Only include relationship_updates when feedback sup
 """.strip(),
         "outcome_scoring": """
 Classify how the Telegram chat responded after a bot message.
-Use replies, reactions, and sentiment together.
+Use replies, reactions, and sentiment_shift together.
+sentiment_shift is the change in chat sentiment after the bot's message versus the
+pre-send baseline (positive = mood improved, negative = mood soured), not an absolute level.
 positive means users engage approvingly or build on the message.
 neutral means some follow-up with no clear positive or negative signal.
 negative means mild disagreement, annoyance, or ignored correction.
@@ -324,13 +326,13 @@ def build_self_reflection_prompt(
     )
 
 
-def build_outcome_scoring_prompt(replies: list[str], reactions: list[dict[str, Any]], sentiment: float) -> tuple[str, str]:
+def build_outcome_scoring_prompt(replies: list[str], reactions: list[dict[str, Any]], sentiment_shift: float) -> tuple[str, str]:
     return build_reflection_prompt(
         "outcome_scoring",
         {
             "replies": replies[:10],
             "reactions": reactions,
-            "follow_up_sentiment": sentiment,
+            "sentiment_shift": sentiment_shift,
         },
     )
 
