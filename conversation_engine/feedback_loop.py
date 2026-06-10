@@ -37,11 +37,11 @@ def count_negative_emojis(reactions: list[Reaction]) -> int:
     return sum(reaction.count for reaction in reactions if reaction.emoji in NEGATIVE_EMOJIS)
 
 
-async def ai_score_outcome(ai_client, replies: list[Any], reactions: list[Reaction], sentiment: float) -> tuple[str, float]:
+async def ai_score_outcome(ai_client, replies: list[Any], reactions: list[Reaction], sentiment_shift: float) -> tuple[str, float]:
     prompt, system = build_outcome_scoring_prompt(
         replies=[getattr(reply, "text_cleaned", None) or getattr(reply, "text_raw", "") for reply in replies[:10]],
         reactions=[reaction.__dict__ for reaction in reactions],
-        sentiment=sentiment,
+        sentiment_shift=sentiment_shift,
     )
     result = await ai_client.call_perception_model(prompt, system)
     data = json.loads(result.text[result.text.find("{") : result.text.rfind("}") + 1])
@@ -51,25 +51,36 @@ async def ai_score_outcome(ai_client, replies: list[Any], reactions: list[Reacti
 async def score_outcome(
     replies: list[Any],
     reactions: list[Reaction],
-    quote_replies: list[Any],
-    sentiment: float,
+    sentiment_shift: float,
     ai_client=None,
+    chat_killed: bool = False,
 ) -> tuple[str, float]:
     positive_reactions = count_positive_emojis(reactions)
     negative_reactions = count_negative_emojis(reactions)
 
     if len(replies) == 0 and len(reactions) == 0:
+        if chat_killed:
+            return "killed", -0.6
         return "ignored", 0.0
-    if negative_reactions > positive_reactions and sentiment < -0.3:
+    reply_sentiment = avg_vader_sentiment(replies)
+    if negative_reactions > positive_reactions and reply_sentiment < -0.3:
         return "backlash", -0.8
-    if len(quote_replies) > 0 or positive_reactions > 2:
-        return "positive", min(0.5 + (len(quote_replies) * 0.2), 1.0)
-    if sentiment < -0.4:
+    if len(replies) > 0:
+        # Replies to the bot are scored by what the repliers actually said:
+        # hostile -> negative, friendly -> positive, mixed -> proportional.
+        if reply_sentiment <= -0.25:
+            return "negative", max(-1.0, reply_sentiment)
+        if reply_sentiment >= 0.25:
+            return "positive", min(1.0, reply_sentiment)
+        return "neutral", reply_sentiment
+    if positive_reactions > 2:
+        return "positive", min(0.5 + positive_reactions * 0.1, 1.0)
+    if negative_reactions > positive_reactions and negative_reactions >= 3:
+        return "backlash", -0.8
+    if negative_reactions > positive_reactions:
         return "negative", -0.4
-    if len(replies) > 0 and sentiment > -0.2:
-        return "neutral", 0.2
     if ai_client:
-        return await ai_score_outcome(ai_client, replies, reactions, sentiment)
+        return await ai_score_outcome(ai_client, replies, reactions, sentiment_shift)
     return "neutral", 0.0
 
 
@@ -127,19 +138,35 @@ class FeedbackLoop:
                 memory = ConversationMemoryManager(session)
                 replies = await memory.get_replies_to(chat_id, sent_message_id)
                 reactions = await self._fetch_reactions(chat_id, sent_message_id)
-                quote_replies = [
-                    reply
-                    for reply in replies
-                    if reply.reply_to_message_id is not None
-                    and int(reply.reply_to_message_id) == int(sent_message_id)
-                ]
                 follow_up = await memory.get_messages_after(
                     chat_id,
                     sent_message_id,
+                    window_start,
                     window_minutes,
                 )
-                sentiment = avg_vader_sentiment(follow_up)
-                outcome, score = await score_outcome(replies, reactions, quote_replies, sentiment, self.ai_client)
+                baseline = await memory.get_messages_before(chat_id, sent_message_id, limit=20)
+                sentiment_shift = avg_vader_sentiment(follow_up) - avg_vader_sentiment(baseline)
+                chat_killed = False
+                if len(replies) == 0:
+                    before_count = await memory.count_messages_between(
+                        chat_id,
+                        window_start - timedelta(minutes=10),
+                        window_start,
+                        exclude_message_id=sent_message_id,
+                    )
+                    after_count = await memory.count_messages_between(
+                        chat_id,
+                        window_start,
+                        window_start + timedelta(minutes=10),
+                        exclude_message_id=sent_message_id,
+                    )
+                    # Velocity-drop rule: an absolute after_count cutoff almost never
+                    # fires in busy chats; killed = activity dropped to <=20% of the
+                    # pre-send rate.
+                    chat_killed = before_count >= 5 and after_count <= 0.2 * before_count
+                outcome, score = await score_outcome(
+                    replies, reactions, sentiment_shift, self.ai_client, chat_killed=chat_killed
+                )
                 await memory.insert_response_feedback(
                     chat_id=chat_id,
                     bot_memory_id=bot_memory_id,
@@ -148,11 +175,21 @@ class FeedbackLoop:
                     reply_count=len(replies),
                     reaction_count=sum(reaction.count for reaction in reactions),
                     reaction_types=[reaction.emoji for reaction in reactions],
-                    quote_reply_count=len(quote_replies),
-                    follow_up_sentiment=sentiment,
+                    follow_up_sentiment=sentiment_shift,
                     outcome=outcome,
                     outcome_score=score,
                 )
+                replies_by_user: dict[int, list[Any]] = defaultdict(list)
+                for reply in replies:
+                    if reply.sender_id is not None:
+                        replies_by_user[int(reply.sender_id)].append(reply)
+                for user_id, user_replies in replies_by_user.items():
+                    await memory.record_user_exchange(
+                        chat_id=chat_id,
+                        user_id=user_id,
+                        outcome_score=score,
+                        reply_sentiment=avg_vader_sentiment(user_replies),
+                    )
                 record_feedback(outcome, score)
 
 
