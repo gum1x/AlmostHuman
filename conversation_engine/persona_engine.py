@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import random
 from datetime import timedelta
 from typing import Any
@@ -26,6 +27,10 @@ _embedder: Any | None = None
 
 
 class ZeroEmbedder:
+    """All-zero vectors corrupt pgvector cosine ranking — only valid as an
+    explicit opt-in fake for tests (ALLOW_FAKE_EMBEDDER=true) when
+    sentence-transformers is missing, never a silent default."""
+
     def encode(self, text: str) -> list[float]:
         return [0.0] * 384
 
@@ -33,16 +38,26 @@ class ZeroEmbedder:
 def load_embedder(model_name: str):
     global _embedder
     if _embedder is None:
-        if SentenceTransformer is None:
+        if SentenceTransformer is not None:
+            _embedder = SentenceTransformer(model_name)
+        elif os.getenv("ALLOW_FAKE_EMBEDDER", "").lower() == "true":
             _embedder = ZeroEmbedder()
         else:
-            _embedder = SentenceTransformer(model_name)
+            raise RuntimeError(
+                "sentence-transformers is not installed: embeddings would be all-zero and "
+                "silently corrupt all pgvector cosine ranking. Install sentence-transformers, "
+                "or set ALLOW_FAKE_EMBEDDER=true (tests only)."
+            )
     return _embedder
 
 
 def embed_text(text: str) -> list[float]:
-    embedder = _embedder or ZeroEmbedder()
-    value = embedder.encode(text)
+    if _embedder is None:
+        raise RuntimeError(
+            "Embedder not loaded: call load_embedder() at startup "
+            "(or set ALLOW_FAKE_EMBEDDER=true and call load_embedder() in tests)."
+        )
+    value = _embedder.encode(text)
     if hasattr(value, "tolist"):
         value = value.tolist()
     return [float(item) for item in value]
