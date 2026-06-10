@@ -132,7 +132,6 @@ class FakeConversationMemoryManager:
                 sent_message_id=m.get("sent_message_id"),
             ))
         self.bot_user_id = bot_user_id or 0
-        self._bot_response_count = sum(1 for m in self._mems if m.response_text)
 
     def _parse_ts(self, ts: Any) -> datetime | None:
         if ts is None:
@@ -149,7 +148,20 @@ class FakeConversationMemoryManager:
         return 12
 
     async def count_bot_responses(self, chat_id: int, window_minutes: int = 60) -> int:
-        return max(0, min(12, self._bot_response_count))
+        # Respect the window like the real ConversationMemoryManager: seeded
+        # memories may be historical (offline replay), not just this session's.
+        now = datetime.now(timezone.utc)
+        count = 0
+        for m in self._mems:
+            if not m.response_text:
+                continue
+            if m.created_at is None:
+                count += 1
+                continue
+            ts = m.created_at if m.created_at.tzinfo else m.created_at.replace(tzinfo=timezone.utc)
+            if (now - ts).total_seconds() <= window_minutes * 60:
+                count += 1
+        return max(0, min(12, count))
 
     async def avg_relationship_strength(self, chat_id: int, candidate_users: list[int]) -> float:
         return 0.6
@@ -183,8 +195,6 @@ class FakeConversationMemoryManager:
             sent_message_id=kwargs.get("sent_message_id"),
         )
         self._mems.append(mem)
-        if kwargs.get("response_text"):
-            self._bot_response_count += 1
 
     async def latest_message_id(self, chat_id: int) -> int | None:
         return 100000
