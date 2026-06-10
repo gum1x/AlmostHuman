@@ -4,8 +4,9 @@ import asyncio
 import json
 import os
 import signal
+import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from conversation_engine.ai_client import (
@@ -41,12 +42,22 @@ from conversation_engine.persona_engine import (
 )
 from conversation_engine.prompts import build_context_summary_prompt, build_response_decision_prompt
 from conversation_engine.sender import TelegramSender
-from conversation_engine.timing_classifier import TimingClassifier
+from conversation_engine.timing_classifier import (
+    TimingClassifier,
+    compute_regulars,
+    history_feature_inputs,
+)
 from conversation_engine.validators import validate
 from core.logging import get_logger, setup_logging
 from storage.database import async_session_factory, dispose_engine
 
 log = get_logger(__name__)
+
+# Train==serve for the timing classifier: training's "regulars" are the top-K most
+# active senders over the whole export (scripts/build_timing_dataset.py). The serve-time
+# mirror counts senders over this much recent history, cached per chat.
+TIMING_REGULARS_HISTORY_LIMIT = 2000
+TIMING_REGULARS_CACHE_TTL_SECONDS = 1800
 
 
 @dataclass(frozen=True)
@@ -79,6 +90,17 @@ class _CycleLlmOutcome:
     posture: str
     ok: bool
     reason: str | None
+
+
+def _decline_reasoning(reason: str | None, decision: ResponseDecision) -> str:
+    """Reasoning text persisted when a cycle doesn't send: the validator/decline
+    reason plus the model's actual reasoning (not just the constant)."""
+    parts = [reason or "declined"]
+    if decision.reasoning:
+        parts.append(decision.reasoning)
+    if decision.annoying_reason:
+        parts.append(f"annoying_reason: {decision.annoying_reason}")
+    return " | ".join(parts)[:2000]
 
 
 def _append_context_block(context, title: str, body: str):
@@ -127,6 +149,7 @@ class ConversationScheduler:
                 "respond to everything that passes the engagement gate. Enable "
                 "TIMING_CLASSIFIER_ENABLED to control response rate.",
             )
+        self._timing_regulars_cache: dict[int, tuple[float, set[int]]] = {}
         self._shutdown = asyncio.Event()
 
     def shutdown(self) -> None:
@@ -174,6 +197,22 @@ class ConversationScheduler:
             self.config.scheduler.max_interval_seconds,
             int(previous_interval * self.config.scheduler.backoff_multiplier),
         )
+
+    async def _get_timing_regulars(
+        self, memory: ConversationMemoryManager, chat_id: int
+    ) -> set[int]:
+        """Top-K most active senders by message count (train==serve with
+        scripts/build_timing_dataset.py 'regulars'), cached per chat."""
+        now = time.monotonic()
+        cached = self._timing_regulars_cache.get(chat_id)
+        if cached and now - cached[0] < TIMING_REGULARS_CACHE_TTL_SECONDS:
+            return cached[1]
+        history = await memory.get_recent_messages(chat_id, limit=TIMING_REGULARS_HISTORY_LIMIT)
+        regulars = compute_regulars(
+            m.sender_id for m in history if (m.text_cleaned or m.text_raw or "").strip()
+        )
+        self._timing_regulars_cache[chat_id] = (now, regulars)
+        return regulars
 
     async def _run_reflections_if_needed(self, chat_id: int, is_private_dm: bool) -> None:
         if is_private_dm:
@@ -336,16 +375,21 @@ class ConversationScheduler:
             and target_for_direct is not None
         ):
             t_txt = target_for_direct.cleaned_text or target_for_direct.text or ""
-            is_reply = target_for_direct.reply_to_message_id is not None
-            reply_to_regular = (
-                is_reply and target_for_direct.reply_to_message_id in bot_sent_ids
+            # Train==serve: history-derived features computed exactly as
+            # scripts/build_timing_dataset.py does (regulars = top-K active senders,
+            # NOT "replied to the bot"; idx gap = message-index gap since sender last spoke).
+            regulars = await self._get_timing_regulars(memory, chat_id)
+            hist_feats = history_feature_inputs(
+                target_message_id=target_for_direct.message_id,
+                history=high_level_enriched,
+                regulars=regulars,
             )
             ts = self.timing_classifier.score(
                 text=t_txt,
-                is_reply=is_reply,
-                reply_to_regular=reply_to_regular,
-                sender_is_regular=True,
-                idx_gap_since_sender=-1,
+                is_reply=hist_feats["is_reply"],
+                reply_to_regular=hist_feats["reply_to_regular"],
+                sender_is_regular=hist_feats["sender_is_regular"],
+                idx_gap_since_sender=hist_feats["idx_gap_since_sender"],
             )
             if not ts.passes:
                 await memory.insert_ai_decision(
@@ -380,7 +424,12 @@ class ConversationScheduler:
                 return self._backoff_interval(previous_interval)
 
         if not is_private_dm and not gate.should_proceed:
-            if is_direct_for_gate:
+            override_suppressed = (
+                self._direct_override_suppression(gate, target_for_direct, recent_bot_mem, enriched)
+                if is_direct_for_gate
+                else None
+            )
+            if is_direct_for_gate and override_suppressed is None:
                 gate = GateResult(
                     gate_score=gate.gate_score,
                     gate_factors={**gate.gate_factors, "direct_mention_forced": True},
@@ -392,6 +441,18 @@ class ConversationScheduler:
                     message_id=getattr(target_for_direct, "message_id", None),
                 )
             else:
+                if override_suppressed is not None:
+                    gate = GateResult(
+                        gate_score=gate.gate_score,
+                        gate_factors={**gate.gate_factors, "direct_override_suppressed": override_suppressed},
+                        should_proceed=False,
+                    )
+                    await log.ainfo(
+                        "direct_mention_override_suppressed",
+                        chat_id=chat_id,
+                        reason=override_suppressed,
+                        message_id=getattr(target_for_direct, "message_id", None),
+                    )
                 await memory.insert_ai_decision(
                     chat_id=chat_id,
                     prompt_version=self.config.ai.prompt_version,
@@ -580,6 +641,7 @@ class ConversationScheduler:
                 brief=prep.brief,
                 decision=decision,
                 bot_sent_ids=prep.bot_sent_ids,
+                recent_bot_mem=prep.recent_bot_mem,
             )
 
         return _CycleLlmOutcome(
@@ -642,6 +704,7 @@ class ConversationScheduler:
                 brief=prep.brief,
                 decision=decision,
                 bot_sent_ids=prep.bot_sent_ids,
+                recent_bot_mem=prep.recent_bot_mem,
             )
 
         await log.ainfo(
@@ -686,9 +749,9 @@ class ConversationScheduler:
                 )
             )
             if llm_out.ok
-            else llm_out.reason,
+            else _decline_reasoning(llm_out.reason, decision),
             gate_score=prep.gate.gate_score,
-            gate_factors=prep.visible_numeric_controls,
+            gate_factors={**prep.gate.gate_factors, **prep.visible_numeric_controls},
             request1_latency_ms=llm_out.request1.latency_ms,
             request1_tokens_used=llm_out.request1.tokens_used,
             request2_tokens_used=llm_out.request2.tokens_used,
@@ -796,6 +859,80 @@ class ConversationScheduler:
             return "lightly_vibing: available for high-signal or funny moments"
         return "watching: selective and low-ego"
 
+    def _direct_override_suppression(
+        self,
+        gate: GateResult,
+        target,
+        recent_bot_mem: list,
+        enriched,
+    ) -> str | None:
+        """Why a direct reply/mention may NOT force-proceed past a blocked gate.
+
+        Returns None when the override is allowed. Hard caps the bait loop:
+        (a) the 10-min rate cap is absolute, (b) after N consecutive replies to the
+        same user with no other human turn in between, that user's direct replies
+        stop force-proceeding.
+        """
+        if "rate_limit_10min" in gate.gate_factors:
+            return "rate_limit_10min"
+        if self._hit_consecutive_user_cap(target, recent_bot_mem, enriched):
+            return "consecutive_user_cap"
+        return None
+
+    def _hit_consecutive_user_cap(
+        self,
+        target,
+        recent_bot_mem: list,
+        enriched,
+    ) -> bool:
+        cap = self.config.engagement_gate.max_consecutive_replies_per_user
+        if cap <= 0 or target is None or target.sender_id is None:
+            return False
+        sent = [bm for bm in recent_bot_mem if bm.sent_message_id is not None]  # newest first
+        if len(sent) < cap:
+            return False
+        last_n = sent[:cap]
+        if any(bm.reply_to_user_id != target.sender_id for bm in last_n):
+            return False
+        # "No other human turn in between": since the bot's Nth-last reply, only this
+        # user (and the bot itself) have spoken.
+        bot_message_ids = {int(bm.sent_message_id) for bm in sent}
+        oldest_sent_id = min(int(bm.sent_message_id) for bm in last_n)
+        for message in enriched:
+            if message.message_id <= oldest_sent_id:
+                continue
+            if message.sender_id is None or message.sender_id == target.sender_id:
+                continue
+            if self.bot_user_id is not None and message.sender_id == self.bot_user_id:
+                continue
+            if message.message_id in bot_message_ids:
+                continue
+            return False
+        return True
+
+    def _anti_flame_bypass_used_recently(self, recent_bot_mem: list | None) -> bool:
+        """The anti-flame bypass (responding to a direct reply/mention while tension is
+        high) is allowed at most once per same_thread_cooldown_minutes. Derived from
+        BotMemory: a response sent within the cooldown whose brief_snapshot recorded
+        tension at/above the threshold means the bypass was already spent."""
+        if not recent_bot_mem:
+            return False
+        threshold = self.config.engagement_gate.anti_flame_tension_threshold
+        cooldown = timedelta(minutes=self.config.engagement_gate.same_thread_cooldown_minutes)
+        now = datetime.now(timezone.utc)
+        for bm in recent_bot_mem:
+            sent_at = getattr(bm, "sent_at", None)
+            if sent_at is None or now - sent_at >= cooldown:
+                continue
+            snapshot = getattr(bm, "brief_snapshot", None) or {}
+            try:
+                tension = float(snapshot.get("tension_level", 0.0))
+            except (TypeError, ValueError):
+                tension = 0.0
+            if tension >= threshold:
+                return True
+        return False
+
     def _passes_social_safety(
         self,
         *,
@@ -805,6 +942,7 @@ class ConversationScheduler:
         brief: Brief,
         decision: ResponseDecision,
         bot_sent_ids: set[int],
+        recent_bot_mem: list | None = None,
     ) -> tuple[bool, str | None]:
         if is_private_dm:
             return True, None
@@ -818,6 +956,8 @@ class ConversationScheduler:
             decision.reply_to_message_id = target.message_id
 
         if brief.tension_level >= self.config.engagement_gate.anti_flame_tension_threshold:
+            if self._anti_flame_bypass_used_recently(recent_bot_mem):
+                return False, "anti_flame_protection"
             if active_bot_thread:
                 return True, None
             if target:
