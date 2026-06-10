@@ -1,6 +1,6 @@
 from datetime import timezone
 
-from telethon import events, types
+from telethon import events, types, utils
 
 from core.constants import EventType
 from core.logging import get_logger
@@ -105,6 +105,33 @@ def _extract_forward(fwd) -> ForwardMetadata | None:
         from_message_id=fwd.channel_post,
         date=fwd.date.replace(tzinfo=timezone.utc) if fwd.date else None,
     )
+
+
+def _extract_reactions(reactions) -> tuple[list[dict], int]:
+    """Return ([reaction entries], skipped) from a MessageReactions snapshot.
+
+    Every shape with a count contributes: plain emoji as {"emoji", "count"},
+    custom emoji as {"custom_emoji_id", "count"}, paid as {"paid", "count"},
+    and unrecognized shapes as {"emoji": None, "count"}. Only entries without
+    a usable count are counted as skipped rather than failing the whole update.
+    """
+    out = []
+    skipped = 0
+    for rc in getattr(reactions, "results", None) or []:
+        reaction = getattr(rc, "reaction", None)
+        count = getattr(rc, "count", None)
+        if not isinstance(count, int):
+            skipped += 1
+            continue
+        if isinstance(reaction, types.ReactionEmoji):
+            out.append({"emoji": reaction.emoticon, "count": count})
+        elif isinstance(reaction, types.ReactionCustomEmoji):
+            out.append({"custom_emoji_id": str(reaction.document_id), "count": count})
+        elif isinstance(reaction, types.ReactionPaid):
+            out.append({"paid": True, "count": count})
+        else:
+            out.append({"emoji": None, "count": count})
+    return out, skipped
 
 
 def _extract_entities(msg) -> list[dict]:
@@ -217,6 +244,41 @@ async def _produce_new_message(event, producer: QueueProducer, chat_type: str) -
         await log.aexception("produce_failed", message_id=msg.id, chat_id=msg.chat_id)
 
 
+async def _produce_reaction_update(update, producer: QueueProducer, chats: list[int] | None) -> None:
+    try:
+        chat_id = utils.get_peer_id(update.peer)
+    except Exception:
+        await log.adebug("reaction_update_unrecognized_peer", msg_id=getattr(update, "msg_id", None))
+        return
+
+    if chats and chat_id not in chats:
+        return
+
+    reactions, skipped = _extract_reactions(update.reactions)
+    if skipped:
+        await log.adebug(
+            "reaction_shapes_skipped",
+            skipped=skipped,
+            chat_id=chat_id,
+            message_id=update.msg_id,
+        )
+
+    from datetime import datetime
+    raw_event = RawTelegramEvent(
+        event_type=EventType.REACTION_UPDATE,
+        message_id=update.msg_id,
+        chat_id=chat_id,
+        timestamp=datetime.now(timezone.utc),
+        reactions=reactions,
+        raw={"chat_id": chat_id, "message_id": update.msg_id, "reactions": reactions},
+    )
+
+    try:
+        await producer.produce(raw_event)
+    except Exception:
+        await log.aexception("produce_reaction_failed", chat_id=chat_id, message_id=update.msg_id)
+
+
 def register_handlers(client, producer: QueueProducer, chat_ids: list[int], monitor_private_dms: bool = True):
     chats = chat_ids if chat_ids else None
 
@@ -301,5 +363,9 @@ def register_handlers(client, producer: QueueProducer, chat_ids: list[int], moni
             await producer.produce(raw_event)
         except Exception:
             await log.aexception("produce_action_failed", chat_id=event.chat_id)
+
+    @client.on(events.Raw(types.UpdateMessageReactions))
+    async def on_message_reactions(update):
+        await _produce_reaction_update(update, producer, chats)
 
     return client
