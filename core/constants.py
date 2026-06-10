@@ -21,3 +21,4 @@ class EventType(StrEnum):
     EDIT = "edit"
     DELETE = "delete"
     CHAT_ACTION = "chat_action"
+    REACTION_UPDATE = "reaction_update"

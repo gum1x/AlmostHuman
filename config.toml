@@ -46,3 +46,4 @@ max_fatigue_score = 1.0
 min_gate_score_to_send = 0.15
 max_group_responses_per_10min = 3
 same_thread_cooldown_minutes = 30
+max_consecutive_replies_per_user = 2

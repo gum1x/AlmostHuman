@@ -49,6 +49,7 @@ class RawTelegramEvent(BaseModel):
     grouped_id: int | None = None
     sender_info: SenderInfo | None = None
     deleted_message_ids: list[int] = Field(default_factory=list)
+    reactions: list[dict[str, Any]] = Field(default_factory=list)
     raw: dict[str, Any] = Field(default_factory=dict)
 
 
