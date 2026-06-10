@@ -70,6 +70,9 @@ class Message(Base):
     edit_history: Mapped[dict] = mapped_column(JSONB, server_default="[]")
     grouped_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
+    reactions: Mapped[dict] = mapped_column(JSONB, server_default="[]")
+    reaction_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+
     is_deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
