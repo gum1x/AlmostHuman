@@ -41,6 +41,8 @@ class MessageWorker:
             await self._handle_new_message(event)
         elif event.event_type == EventType.CHAT_ACTION:
             await self._handle_chat_action(event)
+        elif event.event_type == EventType.REACTION_UPDATE:
+            await self._handle_reaction_update(event)
 
     async def _handle_new_message(self, event: RawTelegramEvent):
         msg = self._transform(event)
@@ -110,6 +112,27 @@ class MessageWorker:
 
     async def _handle_chat_action(self, event: RawTelegramEvent):
         await log.adebug("chat_action_received", chat_id=event.chat_id, raw=event.raw)
+
+    async def _handle_reaction_update(self, event: RawTelegramEvent):
+        reactions = event.reactions or []
+        reaction_count = sum(r.get("count", 0) for r in reactions)
+
+        async with async_session_factory() as session:
+            async with session.begin():
+                msg_repo = MessageRepository(session)
+                await msg_repo.apply_reactions(
+                    chat_id=event.chat_id,
+                    message_id=event.message_id,
+                    reactions=reactions,
+                    reaction_count=reaction_count,
+                )
+
+        await log.adebug(
+            "reactions_applied",
+            chat_id=event.chat_id,
+            message_id=event.message_id,
+            reaction_count=reaction_count,
+        )
 
     def _transform(self, event: RawTelegramEvent) -> CanonicalMessage:
         cleaned = clean_text(event.text)
