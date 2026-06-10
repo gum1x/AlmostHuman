@@ -6,6 +6,7 @@ from typing import Any
 
 from sqlalchemy import Select, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from storage.postgres_models import (
@@ -44,6 +45,17 @@ def normalize_embedding(value: Any) -> list[float] | None:
     if hasattr(value, "tolist"):
         value = value.tolist()
     return [float(item) for item in value]
+
+
+def merge_relationship_notes(existing: str | None, new: str, max_length: int = 1000) -> str:
+    """Append new distinct note lines to existing notes, dedupe, cap total length."""
+    parts = [part.strip() for part in (existing or "").split("\n") if part.strip()]
+    for part in (p.strip() for p in new.split("\n")):
+        if part and part not in parts:
+            parts.append(part)
+    while len(parts) > 1 and len("\n".join(parts)) > max_length:
+        parts.pop(0)
+    return "\n".join(parts)[:max_length]
 
 
 class ConversationMemoryManager:
@@ -267,7 +279,6 @@ class ConversationMemoryManager:
         reply_count: int,
         reaction_count: int,
         reaction_types: list[str],
-        quote_reply_count: int,
         follow_up_sentiment: float,
         outcome: str,
         outcome_score: float,
@@ -280,7 +291,6 @@ class ConversationMemoryManager:
             reply_count=reply_count,
             reaction_count=reaction_count,
             reaction_types=reaction_types,
-            quote_reply_count=quote_reply_count,
             follow_up_sentiment=follow_up_sentiment,
             outcome=outcome,
             outcome_score=outcome_score,
@@ -305,44 +315,99 @@ class ConversationMemoryManager:
             update(ResponseFeedback).where(ResponseFeedback.id.in_(feedback_ids)).values(meta_reflected=True)
         )
 
+    async def _get_relationship(self, chat_id: int, user_id: int) -> UserRelationshipProfile | None:
+        result = await self.session.execute(
+            select(UserRelationshipProfile).where(
+                UserRelationshipProfile.chat_id == chat_id,
+                UserRelationshipProfile.user_id == user_id,
+            )
+        )
+        return result.scalar_one_or_none()
+
     async def upsert_user_relationship(
         self,
         chat_id: int,
         user_id: int,
-        notes: str,
+        notes: str | None = None,
         embedding: list[float] | None = None,
         sentiment_trend: float | None = None,
         receptiveness_score: float | None = None,
     ) -> None:
-        values = {
-            "chat_id": chat_id,
-            "user_id": user_id,
-            "notes": notes,
-            "embedding": normalize_embedding(embedding),
-            "last_interaction_at": func.now(),
-            "total_exchanges": 1,
-            "relationship_strength": 0.1,
-        }
+        """Update only the fields the caller explicitly provided; merge notes instead of overwriting."""
+        existing = await self._get_relationship(chat_id, user_id)
+        if existing is None:
+            row = UserRelationshipProfile(
+                chat_id=chat_id,
+                user_id=user_id,
+                notes=notes,
+                embedding=normalize_embedding(embedding),
+                last_interaction_at=utcnow(),
+            )
+            if sentiment_trend is not None:
+                row.sentiment_trend = sentiment_trend
+            if receptiveness_score is not None:
+                row.receptiveness_score = receptiveness_score
+            try:
+                # SAVEPOINT so a concurrent first-insert race only rolls back
+                # this insert, not the caller's outer transaction.
+                async with self.session.begin_nested():
+                    self.session.add(row)
+                    await self.session.flush()
+                return
+            except IntegrityError:
+                # Lost the race: the row exists now, fall through to update it.
+                existing = await self._get_relationship(chat_id, user_id)
+        if notes is not None:
+            existing.notes = merge_relationship_notes(existing.notes, notes)
+        if embedding is not None:
+            existing.embedding = normalize_embedding(embedding)
         if sentiment_trend is not None:
-            values["sentiment_trend"] = sentiment_trend
+            existing.sentiment_trend = sentiment_trend
         if receptiveness_score is not None:
-            values["receptiveness_score"] = receptiveness_score
-        stmt = insert(UserRelationshipProfile).values(**values)
-        stmt = stmt.on_conflict_do_update(
-            constraint="uq_relationship_chat_user",
-            set_={
-                "notes": stmt.excluded.notes,
-                "embedding": stmt.excluded.embedding,
-                "last_interaction_at": func.now(),
-                "total_exchanges": UserRelationshipProfile.total_exchanges + 1,
-                "relationship_strength": func.least(
-                    1.0, UserRelationshipProfile.relationship_strength + 0.05
-                ),
-                "sentiment_trend": stmt.excluded.sentiment_trend,
-                "receptiveness_score": stmt.excluded.receptiveness_score,
-            },
+            existing.receptiveness_score = receptiveness_score
+        existing.last_interaction_at = utcnow()
+
+    async def record_user_exchange(
+        self,
+        chat_id: int,
+        user_id: int,
+        outcome_score: float,
+        reply_sentiment: float,
+    ) -> None:
+        """Update a relationship profile from a real exchange (user replied to the bot).
+
+        Increments total_exchanges, nudges relationship_strength by outcome sign
+        (small bounded step), and tracks sentiment_trend as an EMA of reply sentiment.
+        """
+        step = 0.05 if outcome_score > 0 else -0.05 if outcome_score < 0 else 0.0
+        existing = await self._get_relationship(chat_id, user_id)
+        if existing is None:
+            try:
+                # SAVEPOINT so a concurrent first-insert race only rolls back
+                # this insert, not the caller's outer transaction.
+                async with self.session.begin_nested():
+                    self.session.add(
+                        UserRelationshipProfile(
+                            chat_id=chat_id,
+                            user_id=user_id,
+                            total_exchanges=1,
+                            relationship_strength=max(0.0, min(1.0, 0.1 + step)),
+                            sentiment_trend=reply_sentiment,
+                            last_interaction_at=utcnow(),
+                        )
+                    )
+                    await self.session.flush()
+                return
+            except IntegrityError:
+                # Lost the race: the row exists now, fall through to update it.
+                existing = await self._get_relationship(chat_id, user_id)
+        alpha = 0.3
+        existing.total_exchanges = (existing.total_exchanges or 0) + 1
+        existing.relationship_strength = max(
+            0.0, min(1.0, float(existing.relationship_strength or 0.0) + step)
         )
-        await self.session.execute(stmt)
+        existing.sentiment_trend = (1 - alpha) * float(existing.sentiment_trend or 0.0) + alpha * reply_sentiment
+        existing.last_interaction_at = utcnow()
 
     async def get_relationship_profiles(self, chat_id: int, user_ids: list[int]) -> list[UserRelationshipProfile]:
         if not user_ids:
@@ -607,18 +672,54 @@ class ConversationMemoryManager:
         )
         return [int(row.chat_id) for row in result.all()]
 
-    async def get_messages_after(self, chat_id: int, sent_message_id: int, window_minutes: int) -> list[Message]:
+    async def get_messages_after(self, chat_id: int, sent_message_id: int, sent_at: datetime, window_minutes: int) -> list[Message]:
         result = await self.session.execute(
             select(Message)
             .where(
                 Message.chat_id == chat_id,
                 Message.message_id > sent_message_id,
-                Message.timestamp <= utcnow() + timedelta(minutes=window_minutes),
+                Message.timestamp >= sent_at,
+                Message.timestamp <= sent_at + timedelta(minutes=window_minutes),
                 Message.is_deleted.is_(False),
             )
             .order_by(Message.timestamp.asc())
         )
         return list(result.scalars().all())
+
+    async def get_messages_before(self, chat_id: int, sent_message_id: int, limit: int = 20) -> list[Message]:
+        result = await self.session.execute(
+            select(Message)
+            .where(
+                Message.chat_id == chat_id,
+                Message.message_id < sent_message_id,
+                Message.is_deleted.is_(False),
+            )
+            .order_by(Message.message_id.desc())
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
+    async def count_messages_between(
+        self,
+        chat_id: int,
+        start: datetime,
+        end: datetime,
+        exclude_message_id: int | None = None,
+    ) -> int:
+        stmt = (
+            select(func.count())
+            .select_from(Message)
+            .where(
+                Message.chat_id == chat_id,
+                Message.timestamp >= start,
+                Message.timestamp < end,
+                Message.is_deleted.is_(False),
+            )
+        )
+        if exclude_message_id is not None:
+            stmt = stmt.where(Message.message_id != exclude_message_id)
+        result = await self.session.execute(stmt)
+        return int(result.scalar_one())
 
     async def get_replies_to(self, chat_id: int, sent_message_id: int) -> list[Message]:
         result = await self.session.execute(
