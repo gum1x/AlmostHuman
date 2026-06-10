@@ -80,6 +80,14 @@ class MessageRepository:
         )
         await self.session.flush()
 
+    async def apply_reactions(self, chat_id: int, message_id: int, reactions: list[dict], reaction_count: int):
+        await self.session.execute(
+            update(Message)
+            .where(Message.chat_id == chat_id, Message.message_id == message_id)
+            .values(reactions=reactions, reaction_count=reaction_count)
+        )
+        await self.session.flush()
+
     async def apply_deletions(self, chat_id: int, message_ids: list[int], observed_at: datetime):
         if not message_ids:
             return
