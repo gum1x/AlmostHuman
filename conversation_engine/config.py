@@ -85,6 +85,9 @@ class EngagementGateConfig:
     min_gate_score_to_send: float = 0.25
     max_group_responses_per_10min: int = 3
     same_thread_cooldown_minutes: int = 30
+    # Bait-loop cap: after this many consecutive bot replies to the same user (no other
+    # human turn in between), that user's direct replies stop force-proceeding the gate.
+    max_consecutive_replies_per_user: int = 2
 
 
 @dataclass(frozen=True)
