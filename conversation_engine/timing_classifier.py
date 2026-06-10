@@ -21,9 +21,10 @@ from __future__ import annotations
 import json
 import math
 import re
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional, Sequence
 
 import structlog
 
@@ -67,6 +68,69 @@ def _is_botlike(text: str) -> bool:
     if text.count("\n") >= 3 and len(text) > 120:
         return True
     return False
+
+
+# --- train==serve history features: mirror scripts/build_timing_dataset.py exactly ---
+# Training defines (build_timing_dataset.py main()):
+#   regulars             = top-K most active senders by message count (--regular-top-k, default 60)
+#   reply_to_regular     = parent message is in the export AND its author is a regular
+#   sender_is_regular    = sender in regulars
+#   idx_gap_since_sender = i - last_spoke_idx[sender] (message-index gap), -1 if not seen before
+# load_ordered() drops empty-text messages before any indexing/counting, so we do too.
+
+REGULAR_TOP_K = 60  # build_timing_dataset.py --regular-top-k default
+
+
+def compute_regulars(sender_ids: Iterable[int | None], top_k: int = REGULAR_TOP_K) -> set[int]:
+    """Top-K most active senders, exactly as build_timing_dataset.py defines 'regulars'."""
+    counts: dict[int, int] = defaultdict(int)
+    for sender in sender_ids:
+        if sender:
+            counts[sender] += 1
+    return {u for u, _ in sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:top_k]}
+
+
+def history_feature_inputs(
+    *,
+    target_message_id: int,
+    history: Sequence,
+    regulars: set[int],
+) -> dict:
+    """Serve-time computation of the history-derived feature inputs for score().
+
+    ``history`` must be ordered oldest -> newest; items need .message_id, .sender_id,
+    .reply_to_message_id and .text (EnrichedMessage works). Matches the training
+    definitions above; unknown target falls back to the all-defaults row.
+    """
+    rows = [m for m in history if (m.text or "").strip()]
+    sender_of = {m.message_id: m.sender_id for m in rows}
+    target_idx = None
+    for i, m in enumerate(rows):
+        if m.message_id == target_message_id:
+            target_idx = i
+            break
+    if target_idx is None:
+        return {
+            "is_reply": False,
+            "reply_to_regular": False,
+            "sender_is_regular": False,
+            "idx_gap_since_sender": -1,
+        }
+    target = rows[target_idx]
+    parent = target.reply_to_message_id
+    sender = target.sender_id
+    idx_gap = -1
+    if sender is not None:
+        for j in range(target_idx - 1, -1, -1):
+            if rows[j].sender_id == sender:
+                idx_gap = target_idx - j
+                break
+    return {
+        "is_reply": parent is not None,
+        "reply_to_regular": bool(parent and parent in sender_of and sender_of[parent] in regulars),
+        "sender_is_regular": sender in regulars if sender is not None else False,
+        "idx_gap_since_sender": idx_gap,
+    }
 
 
 @dataclass
