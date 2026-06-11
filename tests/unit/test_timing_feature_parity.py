@@ -415,3 +415,58 @@ async def test_timing_regulars_cached_per_chat():
     second = await scheduler._get_timing_regulars(memory, chat_id=-100)
     assert first == second
     assert memory.recent_message_calls.count(TIMING_REGULARS_HISTORY_LIMIT) == 1
+
+
+# --- frozen regulars: v2 models embed the trained regulars set; serving must use it ---
+
+V1_MODEL = {
+    "feature_order": ["is_mention"],
+    "weights": [1.0],
+    "bias": 0.0,
+    "feature_mean": [0.0],
+    "feature_std": [1.0],
+    "chosen_threshold": 0.6,
+}
+
+
+def write_model(tmp_path: Path, extra: dict) -> Path:
+    import json
+
+    path = tmp_path / "model.json"
+    path.write_text(json.dumps({**V1_MODEL, **extra}))
+    return path
+
+
+def test_classifier_exposes_frozen_regulars_when_present(tmp_path):
+    tc = TimingClassifier(model_path=write_model(tmp_path, {"regulars": [1, 2, 3]}))
+    assert tc.ok
+    assert tc.regulars == {1, 2, 3}
+
+
+def test_classifier_regulars_none_for_v1_model(tmp_path):
+    tc = TimingClassifier(model_path=write_model(tmp_path, {}))
+    assert tc.ok
+    assert tc.regulars is None
+
+
+async def test_scheduler_uses_frozen_regulars_not_recent_window(tmp_path):
+    scheduler = make_scheduler()
+    scheduler.timing_classifier = TimingClassifier(
+        model_path=write_model(tmp_path, {"regulars": [U2, U4]})
+    )
+    memory = FakeMemory(messages=FIXTURE)
+    regulars = await scheduler._get_timing_regulars(memory, chat_id=-100)
+    # Frozen set used verbatim (recent-window top-K would be {U1, U2, U3}), no DB read.
+    assert regulars == {U2, U4}
+    assert memory.recent_message_calls == []
+
+
+async def test_scheduler_falls_back_to_recent_window_without_frozen_regulars(tmp_path):
+    scheduler = make_scheduler()
+    scheduler.timing_classifier = TimingClassifier(model_path=write_model(tmp_path, {}))
+    memory = FakeMemory(messages=FIXTURE)
+    regulars = await scheduler._get_timing_regulars(memory, chat_id=-100)
+    assert regulars == compute_regulars(
+        (m.sender_id for m in FIXTURE if m.text.strip()), top_k=60
+    )
+    assert memory.recent_message_calls == [TIMING_REGULARS_HISTORY_LIMIT]
