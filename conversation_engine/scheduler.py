@@ -202,7 +202,14 @@ class ConversationScheduler:
         self, memory: ConversationMemoryManager, chat_id: int
     ) -> set[int]:
         """Top-K most active senders by message count (train==serve with
-        scripts/build_timing_dataset.py 'regulars'), cached per chat."""
+        scripts/build_timing_dataset.py 'regulars'), cached per chat.
+
+        If the loaded model embeds its frozen training regulars (v2), use those
+        directly — recomputing over a recent window would change what the trained
+        reply_to_regular/sender_is_regular features mean."""
+        frozen = getattr(self.timing_classifier, "regulars", None)
+        if frozen is not None:
+            return frozen
         now = time.monotonic()
         cached = self._timing_regulars_cache.get(chat_id)
         if cached and now - cached[0] < TIMING_REGULARS_CACHE_TTL_SECONDS:

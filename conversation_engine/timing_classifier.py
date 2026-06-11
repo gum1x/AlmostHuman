@@ -147,6 +147,10 @@ class TimingClassifier:
     def __init__(self, model_path: Optional[Path] = None):
         self.ok = False
         self.threshold = 0.8
+        # Frozen training regulars (v2 models embed them): the exact top-K population
+        # the reply_to_regular/sender_is_regular features were trained against. None
+        # for v1 models => caller falls back to recent-window computation.
+        self.regulars: Optional[set[int]] = None
         path = Path(model_path) if model_path else DEFAULT_MODEL_PATH
         try:
             data = json.loads(Path(path).read_text())
@@ -156,12 +160,15 @@ class TimingClassifier:
             self.mean = data["feature_mean"]
             self.std = data["feature_std"]
             self.threshold = float(data.get("chosen_threshold", 0.8))
+            if data.get("regulars"):
+                self.regulars = {int(u) for u in data["regulars"]}
             self.ok = True
             log.info(
                 "timing_classifier_loaded",
                 path=str(path),
                 threshold=self.threshold,
                 n_features=len(self.feature_order),
+                n_frozen_regulars=len(self.regulars) if self.regulars else 0,
             )
         except Exception as exc:  # missing/corrupt model => disabled, fail open
             log.warning("timing_classifier_load_failed", path=str(path), error=str(exc))
