@@ -6,7 +6,6 @@ from typing import Any
 from conversation_engine.config import EngineConfig
 from conversation_engine.context_builder import ContextBundle, format_enriched_for_context
 
-
 JSON_ONLY_SYSTEM = """
 Return only valid JSON, no markdown or extra keys.
 
