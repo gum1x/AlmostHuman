@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from conversation_engine import humanizer, suspicion_monitor, volume_governor
 from conversation_engine.ai_client import (
     AiCallResult,
     FakeAiClient,
@@ -19,7 +20,6 @@ from conversation_engine.ai_client import (
     parse_response_decision,
 )
 from conversation_engine.bootstrap import run_bootstrap
-from conversation_engine.style_rewriter import LocalStyleRewriter
 from conversation_engine.config import EngineConfig, load_engine_config
 from conversation_engine.context_builder import (
     ContextBundle,
@@ -28,23 +28,23 @@ from conversation_engine.context_builder import (
     format_quantitative_signals,
     select_target_message,
 )
-from conversation_engine import humanizer, suspicion_monitor, volume_governor
 from conversation_engine.engagement_gate import GateResult, compute_gate_score
 from conversation_engine.enrichment import Brief, build_brief, current_context_text, enrich_messages
-from conversation_engine.output_planner import Action, OutputPlan, plan_output
 from conversation_engine.feedback_loop import FeedbackLoop, run_meta_reflection
 from conversation_engine.memory_manager import ConversationMemoryManager
+from conversation_engine.output_planner import Action, OutputPlan, plan_output
 from conversation_engine.persona_engine import (
     get_relevant_persona_vectors,
     load_embedder,
+    run_self_reflection,
     seed_persona_core,
     should_run_self_reflection,
-    run_self_reflection,
     write_interaction_memory,
     write_stance_memory,
 )
 from conversation_engine.prompts import build_context_summary_prompt, build_response_decision_prompt
 from conversation_engine.sender import TelegramSender
+from conversation_engine.style_rewriter import LocalStyleRewriter
 from conversation_engine.timing_classifier import (
     TimingClassifier,
     compute_regulars,

@@ -3,11 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from conversation_engine.enrichment import Brief, EnrichedMessage
 from conversation_engine.engagement_gate import GateResult, get_candidate_user_ids
+from conversation_engine.enrichment import Brief, EnrichedMessage
 from conversation_engine.memory_manager import ConversationMemoryManager, RetrievedMemory
 from storage.postgres_models import BotPersonaCore, BotSelfReflection, UserRelationshipProfile
-
 
 _AVERAGE_CHARS_PER_TOKEN = 4
 _NEARBY_NOISE_TERMS = (

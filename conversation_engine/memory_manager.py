@@ -166,7 +166,6 @@ class ConversationMemoryManager:
             days_old = func.extract(
                 "epoch", func.now() - BotVectorMemory.created_at
             ) / 86400.0
-            decay = func.exp(-0.05 * days_old).label("decay")
             score = ((1 - distance) * BotVectorMemory.importance_score * func.exp(-0.05 * days_old)).label("score")
             stmt: Select = (
                 select(
