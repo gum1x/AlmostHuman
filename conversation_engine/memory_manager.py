@@ -21,6 +21,7 @@ from storage.postgres_models import (
     ConversationSummary,
     FailedCycle,
     Message,
+    PendingObservation,
     ResponseFeedback,
     StanceTracker,
     UserRelationshipProfile,
@@ -56,6 +57,20 @@ def merge_relationship_notes(existing: str | None, new: str, max_length: int = 1
     while len(parts) > 1 and len("\n".join(parts)) > max_length:
         parts.pop(0)
     return "\n".join(parts)[:max_length]
+
+
+def _serialize_dossier_field(value: Any) -> Any:
+    """Coerce a dossier field to a JSON-able dict/list for a JSONB column.
+
+    Accepts already-serialized dicts/lists (returned as-is) or dossier
+    dataclasses exposing ``to_dict()``. ``None`` means "field not provided"
+    and is passed through unchanged so callers can update fields selectively.
+    """
+    if value is None:
+        return None
+    if hasattr(value, "to_dict"):
+        return value.to_dict()
+    return value
 
 
 class ConversationMemoryManager:
@@ -315,6 +330,65 @@ class ConversationMemoryManager:
             update(ResponseFeedback).where(ResponseFeedback.id.in_(feedback_ids)).values(meta_reflected=True)
         )
 
+    async def insert_pending_observation(
+        self,
+        chat_id: int,
+        bot_memory_id: int,
+        sent_message_id: int,
+        due_at: datetime,
+        sent_at: datetime | None = None,
+    ) -> int:
+        row = PendingObservation(
+            chat_id=chat_id,
+            bot_memory_id=bot_memory_id,
+            sent_message_id=sent_message_id,
+            sent_at=sent_at,
+            due_at=due_at,
+        )
+        self.session.add(row)
+        await self.session.flush()
+        return row.id
+
+    async def claim_due_observations(self, now: datetime, limit: int = 20) -> list[dict[str, Any]]:
+        """Atomically claim observations whose due_at has passed.
+
+        Returns lightweight dicts (id/chat_id/bot_memory_id/sent_message_id) and
+        stamps claimed_at=now on the same rows in this transaction, so a second
+        poller (or a re-run at the same ``now``) will not pick them up again.
+        """
+        result = await self.session.execute(
+            select(PendingObservation)
+            .where(PendingObservation.due_at <= now, PendingObservation.claimed_at.is_(None))
+            .order_by(PendingObservation.due_at.asc())
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        )
+        rows = list(result.scalars().all())
+        claimed = []
+        for row in rows:
+            row.claimed_at = now
+            claimed.append(
+                {
+                    "id": row.id,
+                    "chat_id": row.chat_id,
+                    "bot_memory_id": row.bot_memory_id,
+                    "sent_message_id": row.sent_message_id,
+                    "sent_at": row.sent_at,
+                }
+            )
+        if rows:
+            await self.session.flush()
+        return claimed
+
+    async def delete_pending_observation(self, obs_id: int) -> None:
+        await self.session.execute(
+            PendingObservation.__table__.delete().where(PendingObservation.id == obs_id)
+        )
+
+    async def count_pending_observations(self) -> int:
+        result = await self.session.execute(select(func.count()).select_from(PendingObservation))
+        return int(result.scalar_one() or 0)
+
     async def _get_relationship(self, chat_id: int, user_id: int) -> UserRelationshipProfile | None:
         result = await self.session.execute(
             select(UserRelationshipProfile).where(
@@ -419,6 +493,87 @@ class ConversationMemoryManager:
             )
         )
         return list(result.scalars().all())
+
+    async def get_dossiers(self, chat_id: int, user_ids: list[int]) -> dict[int, dict[str, Any]]:
+        """Return {user_id: {dossier, tone, aliases}} for the given users.
+
+        Reuses the get_relationship_profiles query shape. Users with no
+        relationship row are simply absent from the returned dict.
+        """
+        profiles = await self.get_relationship_profiles(chat_id, user_ids)
+        return {
+            profile.user_id: {
+                "dossier": profile.dossier or {},
+                "tone": profile.tone or {},
+                "aliases": profile.aliases or [],
+            }
+            for profile in profiles
+        }
+
+    async def write_dossier(
+        self,
+        chat_id: int,
+        user_id: int,
+        dossier: Any | None = None,
+        tone: Any | None = None,
+        aliases: Any | None = None,
+    ) -> None:
+        """Upsert the dossier/tone/aliases JSONB onto the relationship row.
+
+        Creates the row if absent (race-safe via SAVEPOINT, like
+        upsert_user_relationship). Only the explicitly provided fields are
+        written. Accepts already-serialized dicts/lists or dossier dataclasses
+        (serialized via conversation_engine.dossier when available).
+        """
+        dossier_value = _serialize_dossier_field(dossier)
+        tone_value = _serialize_dossier_field(tone)
+        aliases_value = _serialize_dossier_field(aliases)
+
+        existing = await self._get_relationship(chat_id, user_id)
+        if existing is None:
+            row = UserRelationshipProfile(
+                chat_id=chat_id,
+                user_id=user_id,
+                last_interaction_at=utcnow(),
+            )
+            if dossier_value is not None:
+                row.dossier = dossier_value
+            if tone_value is not None:
+                row.tone = tone_value
+            if aliases_value is not None:
+                row.aliases = aliases_value
+            try:
+                # SAVEPOINT so a concurrent first-insert race only rolls back
+                # this insert, not the caller's outer transaction.
+                async with self.session.begin_nested():
+                    self.session.add(row)
+                    await self.session.flush()
+                return
+            except IntegrityError:
+                # Lost the race: the row exists now, fall through to update it.
+                existing = await self._get_relationship(chat_id, user_id)
+        if dossier_value is not None:
+            existing.dossier = dossier_value
+        if tone_value is not None:
+            existing.tone = tone_value
+        if aliases_value is not None:
+            existing.aliases = aliases_value
+        existing.last_interaction_at = utcnow()
+
+    async def get_today_callback_count(self, chat_id: int, since: datetime) -> int:
+        """Count BotMemory rows in this chat since `since` that recorded a callback.
+
+        Marker contract: a BotMemory row used a memory callback when its
+        reasoning text contains the literal "[callback]" tag.
+        """
+        result = await self.session.execute(
+            select(func.count()).select_from(BotMemory).where(
+                BotMemory.chat_id == chat_id,
+                BotMemory.sent_at >= since,
+                BotMemory.reasoning.contains("[callback]"),
+            )
+        )
+        return int(result.scalar_one())
 
     async def avg_relationship_strength(self, chat_id: int, user_ids: list[int]) -> float:
         if not user_ids:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import random
 import signal
 import time
 from dataclasses import dataclass
@@ -27,8 +28,10 @@ from conversation_engine.context_builder import (
     format_quantitative_signals,
     select_target_message,
 )
+from conversation_engine import humanizer, suspicion_monitor, volume_governor
 from conversation_engine.engagement_gate import GateResult, compute_gate_score
 from conversation_engine.enrichment import Brief, build_brief, current_context_text, enrich_messages
+from conversation_engine.output_planner import Action, OutputPlan, plan_output
 from conversation_engine.feedback_loop import FeedbackLoop, run_meta_reflection
 from conversation_engine.memory_manager import ConversationMemoryManager
 from conversation_engine.persona_engine import (
@@ -47,7 +50,12 @@ from conversation_engine.timing_classifier import (
     compute_regulars,
     history_feature_inputs,
 )
-from conversation_engine.validators import validate
+from conversation_engine.validators import (
+    apply_donor_casing,
+    strip_terminal_period,
+    validate,
+    violates_ai_tell,
+)
 from core.logging import get_logger, setup_logging
 from storage.database import async_session_factory, dispose_engine
 
@@ -58,6 +66,19 @@ log = get_logger(__name__)
 # mirror counts senders over this much recent history, cached per chat.
 TIMING_REGULARS_HISTORY_LIMIT = 2000
 TIMING_REGULARS_CACHE_TTL_SECONDS = 1800
+
+# Liveness: touched after every completed cycle; the compose healthcheck alarms when
+# it goes stale (engine hung/dead but container still "running").
+HEARTBEAT_FILE = os.getenv("ENGINE_HEARTBEAT_FILE", "/tmp/engine_heartbeat")
+DEADMAN_PING_INTERVAL_SECONDS = 60
+
+
+def _touch_heartbeat() -> None:
+    try:
+        with open(HEARTBEAT_FILE, "w") as f:
+            f.write(str(time.time()))
+    except OSError:
+        pass
 
 
 @dataclass(frozen=True)
@@ -80,6 +101,9 @@ class _CyclePrep:
     recent_bot_activity: str
     posture: str
     responses_last_hour: int
+    # Behavioral-layer counts (only populated when behavioral_layer_enabled; else 0).
+    group_msgs_last_hour: int = 0
+    bot_sends_last_10min: int = 0
 
 
 @dataclass(frozen=True)
@@ -150,7 +174,20 @@ class ConversationScheduler:
                 "TIMING_CLASSIFIER_ENABLED to control response rate.",
             )
         self._timing_regulars_cache: dict[int, tuple[float, set[int]]] = {}
+        # Behavioral-layer rng: a fixed seed (config.behavioral_rng_seed) makes the
+        # humanizer/governor/output-planner draws deterministic; None => per-process.
+        self._behavioral_rng = random.Random(config.behavioral_rng_seed)
         self._shutdown = asyncio.Event()
+        self._deadman_url = (os.getenv("DEADMAN_PING_URL") or "").strip()
+        self._last_deadman_ping = 0.0
+        # Per-chat "go dark" cooldowns: when the room accuses a bot we suppress
+        # sends until this wall-clock time, independent of whether the accusing
+        # message is still in the recent window. In-memory only — lost on restart
+        # (acceptable: a restart just ends the dark period early).
+        self._dark_until: dict[int, datetime] = {}
+        # Strong refs to fire-and-forget background tasks so they aren't GC'd
+        # mid-flight (asyncio only holds weak refs to running tasks).
+        self._bg_tasks: set[asyncio.Task] = set()
 
     def shutdown(self) -> None:
         self._shutdown.set()
@@ -170,7 +207,9 @@ class ConversationScheduler:
                 done_ids = [chat_id for chat_id, task in tasks.items() if task.done()]
                 for chat_id in done_ids:
                     tasks.pop(chat_id, None)
-                await asyncio.sleep(self.config.scheduler.dm_discovery_interval_seconds)
+                await self._sleep_interruptible(
+                    self.config.scheduler.dm_discovery_interval_seconds
+                )
         finally:
             for task in tasks.values():
                 task.cancel()
@@ -188,9 +227,53 @@ class ConversationScheduler:
         interval = self.config.scheduler.initial_interval_seconds
         while not self._shutdown.is_set():
             interval = await self._run_cycle(chat_id, interval)
-            await asyncio.sleep(interval)
+            _touch_heartbeat()
+            self._maybe_ping_deadman()
+            await self._sleep_interruptible(interval)
 
-# Patch content - spliced into scheduler.py by maintenance script
+    async def _sleep_interruptible(self, seconds: float) -> None:
+        """Sleep that wakes on shutdown so docker stop doesn't hit the SIGKILL grace
+        timeout mid-interval (the recurring Exited(137))."""
+        try:
+            await asyncio.wait_for(self._shutdown.wait(), timeout=seconds)
+        except asyncio.TimeoutError:
+            pass
+
+    async def _sleep_keeping_heartbeat(self, seconds: float) -> bool:
+        """Wait ``seconds`` total in short, shutdown-interruptible slices, refreshing
+        the liveness heartbeat each slice. Used for the humanized send-delay, which can
+        be many minutes: a single sleep would let the heartbeat go stale (>900s) and let
+        autoheal SIGKILL the container mid-send. Returns True if shutdown was signaled
+        (caller should abort), else False once the full delay has elapsed."""
+        remaining = seconds
+        while remaining > 0:
+            slice_s = min(60.0, remaining)
+            await self._sleep_interruptible(slice_s)
+            if self._shutdown.is_set():
+                return True
+            _touch_heartbeat()
+            remaining -= slice_s
+        return False
+
+    def _maybe_ping_deadman(self) -> None:
+        if not self._deadman_url:
+            return
+        now = time.monotonic()
+        if now - self._last_deadman_ping < DEADMAN_PING_INTERVAL_SECONDS:
+            return
+        self._last_deadman_ping = now
+        task = asyncio.create_task(self._ping_deadman())
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+
+    async def _ping_deadman(self) -> None:
+        try:
+            import httpx
+
+            async with httpx.AsyncClient(timeout=10) as client:
+                await client.get(self._deadman_url)
+        except Exception:
+            pass
 
     def _backoff_interval(self, previous_interval: int) -> int:
         return min(
@@ -267,6 +350,11 @@ class ConversationScheduler:
                     raw_context = prep.raw_context
 
             llm_out = await self._execute_llm(prep)
+
+            if self.config.behavioral_layer_enabled:
+                # Behavioral path manages its own (short) transactions so that
+                # humanizing delays are awaited OUTSIDE any open transaction.
+                return await self._finalize_cycle_behavioral(chat_id, prep, llm_out)
 
             async with async_session_factory() as session:
                 async with session.begin():
@@ -520,6 +608,14 @@ class ConversationScheduler:
         )
         responses_last_hour = await memory.count_bot_responses(chat_id, window_minutes=60)
 
+        # Behavioral volume-governor inputs: only queried when the layer is on so the
+        # flag-OFF path issues no extra queries.
+        group_msgs_last_hour = 0
+        bot_sends_last_10min = 0
+        if self.config.behavioral_layer_enabled and not is_private_dm:
+            group_msgs_last_hour = await memory.count_messages_in_window(chat_id, minutes=60)
+            bot_sends_last_10min = await memory.count_bot_responses(chat_id, window_minutes=10)
+
         return _CyclePrep(
             chat_id=chat_id,
             is_private_dm=is_private_dm,
@@ -539,6 +635,8 @@ class ConversationScheduler:
             recent_bot_activity=recent_bot_activity,
             posture=posture,
             responses_last_hour=responses_last_hour,
+            group_msgs_last_hour=group_msgs_last_hour,
+            bot_sends_last_10min=bot_sends_last_10min,
         )
 
     async def _execute_llm(self, prep: _CyclePrep) -> _CycleLlmOutcome:
@@ -804,6 +902,296 @@ class ConversationScheduler:
         await memory.record_cycle_success(prep.chat_id)
         return self.config.scheduler.initial_interval_seconds
 
+    # ------------------------------------------------------------------
+    # Behavioral-layer finalize (flag-ON path)
+    # ------------------------------------------------------------------
+
+    async def _record_behavioral_decline(
+        self, prep: _CyclePrep, llm_out: _CycleLlmOutcome, reason: str
+    ) -> None:
+        """Persist a non-sending behavioral cycle (suppressed/declined) as an
+        AiDecision row, mirroring the decline shape of the original finalize."""
+        decision = llm_out.decision
+        async with async_session_factory() as session:
+            async with session.begin():
+                memory = ConversationMemoryManager(session)
+                await memory.insert_ai_decision(
+                    chat_id=prep.chat_id,
+                    prompt_version=self.config.ai.prompt_version,
+                    snapshot_message_id=prep.snapshot_message_id,
+                    new_message_count=prep.new_message_count,
+                    should_respond=False,
+                    confidence=decision.confidence,
+                    response_text=None,
+                    reply_to_message_id=None,
+                    reasoning=_decline_reasoning(reason, decision),
+                    gate_score=prep.gate.gate_score,
+                    gate_factors={**prep.gate.gate_factors, **prep.visible_numeric_controls},
+                    request1_latency_ms=llm_out.request1.latency_ms,
+                    request1_tokens_used=llm_out.request1.tokens_used,
+                    request2_tokens_used=llm_out.request2.tokens_used,
+                )
+                await memory.record_cycle_success(prep.chat_id)
+
+    def _behavioral_suppress_reason(
+        self, prep: _CyclePrep, llm_out: _CycleLlmOutcome, now: datetime
+    ) -> str | None:
+        """Behavioral pre-send suppression checks. Returns a short reason tag when
+        the send should be suppressed, else None. Pure (no I/O) given ``now``."""
+        rng = self._behavioral_rng
+        # Circadian dead window: the bot is "asleep" — never send.
+        if humanizer.is_dead_window(now, seed=self.config.behavioral_rng_seed or 0):
+            return "dead_window"
+        # Still inside a previously-triggered go-dark cooldown: stay silent even though
+        # the accusing message has scrolled out of the recent window.
+        dark_until = self._dark_until.get(prep.chat_id)
+        if dark_until is not None and now < dark_until:
+            return "suspicion_dark_cooldown"
+        # Suspicion: if the room is accusing a bot, go dark instead of replying.
+        recent_texts = [
+            (m.cleaned_text or m.text or "") for m in prep.enriched
+        ]
+        suspicion = suspicion_monitor.scan_for_accusation(
+            recent_texts, bot_username=self.bot_username
+        )
+        if suspicion.accused:
+            dark_s = suspicion_monitor.go_dark_seconds(suspicion, rng)
+            # Persist the cooldown so suppression lasts the intended 20min-4h, not just
+            # while the accusation stays in the recent window.
+            self._dark_until[prep.chat_id] = now + timedelta(seconds=dark_s)
+            return f"suspicion_{suspicion.severity}_dark_{int(dark_s)}s"
+        # Volume governor: stay an invisible minority of traffic.
+        suppress, gov_reason = volume_governor.should_suppress(
+            bot_sends_last_hour=prep.responses_last_hour,
+            group_msgs_last_hour=prep.group_msgs_last_hour,
+            bot_sends_last_10min=prep.bot_sends_last_10min,
+            rng=rng,
+        )
+        if suppress:
+            return f"governor_{gov_reason}"
+        return None
+
+    async def _finalize_cycle_behavioral(
+        self,
+        chat_id: int,
+        prep: _CyclePrep,
+        llm_out: _CycleLlmOutcome,
+        now: datetime | None = None,
+    ) -> int:
+        """Flag-ON finalize: humanized delay + behavioral suppression + output-plan
+        send sequence. Opens a fresh short transaction per physical send so the
+        delays (awaited here) are never inside an open transaction."""
+        now = now or datetime.now(timezone.utc)
+        decision = llm_out.decision
+
+        # An LLM-path decline (validate()/social-safety already said no) is recorded
+        # exactly as before — no behavioral send.
+        if not llm_out.ok:
+            await self._record_behavioral_decline(prep, llm_out, llm_out.reason or "declined")
+            return self.config.scheduler.initial_interval_seconds
+
+        # Behavioral pre-send suppression (dead window / suspicion / governor).
+        if not prep.is_private_dm:
+            suppress_reason = self._behavioral_suppress_reason(prep, llm_out, now)
+            if suppress_reason:
+                await log.ainfo(
+                    "behavioral_suppress", chat_id=chat_id, reason=suppress_reason
+                )
+                await self._record_behavioral_decline(prep, llm_out, suppress_reason)
+                return self.config.scheduler.initial_interval_seconds
+
+        # Donor-voice shaping + AI-tell rejection on the outgoing text.
+        rng = self._behavioral_rng
+        text = decision.response_text or ""
+        text = apply_donor_casing(
+            text, rng, lowercase_rate=self.config.behavioral_donor_lowercase_rate
+        )
+        text = strip_terminal_period(text)
+        tell = violates_ai_tell(text)
+        if tell:
+            await log.ainfo("behavioral_ai_tell_rejected", chat_id=chat_id, tell=tell)
+            await self._record_behavioral_decline(prep, llm_out, f"ai_tell:{tell}")
+            return self.config.scheduler.initial_interval_seconds
+        decision.response_text = text
+
+        plan = plan_output(
+            text=text,
+            reply_to_message_id=decision.reply_to_message_id,
+            rng=rng,
+            humanizer=humanizer,
+            intent_tag=decision.intent_tag,
+            burst_rate_target=self.config.behavioral_burst_rate,
+            allow_media=self.config.behavioral_allow_media,
+        )
+        if plan.suppressed or not plan.actions:
+            await self._record_behavioral_decline(
+                prep, llm_out, f"plan_{plan.suppressed_reason or 'empty'}"
+            )
+            return self.config.scheduler.initial_interval_seconds
+
+        await self._execute_output_plan(chat_id, prep, llm_out, plan)
+        return self.config.scheduler.initial_interval_seconds
+
+    async def _execute_output_plan(
+        self,
+        chat_id: int,
+        prep: _CyclePrep,
+        llm_out: _CycleLlmOutcome,
+        plan: OutputPlan,
+    ) -> None:
+        """Execute an OutputPlan's actions in order. Each action's ``delay_before_s``
+        is awaited OUTSIDE any open transaction; each physical text send gets its own
+        fresh short transaction so a sleep is never held inside one. The first text
+        action carries the reply target and records the canonical AiDecision row;
+        each text send records its own BotMemory row (bursts => multiple rows)."""
+        decision = llm_out.decision
+        persisted_posture = decision.updated_engagement_posture or llm_out.posture
+        first_text_done = False
+
+        for action in plan.actions:
+            if action.delay_before_s > 0:
+                # Slice the (possibly multi-minute) humanized delay so the heartbeat
+                # stays fresh and a shutdown can abort the send cleanly.
+                if await self._sleep_keeping_heartbeat(action.delay_before_s):
+                    return
+
+            if action.kind == "react":
+                if action.emoji and action.reply_to_message_id is not None:
+                    await self.sender.send_reaction(
+                        chat_id, action.reply_to_message_id, action.emoji
+                    )
+                continue
+
+            if action.kind == "media":
+                if self.config.behavioral_allow_media:
+                    await self.sender.send_sticker(
+                        chat_id,
+                        source_message_id=action.sticker_source_message_id,
+                        reply_to_message_id=action.reply_to_message_id,
+                    )
+                continue
+
+            if action.kind != "text" or not (action.text or "").strip():
+                continue
+
+            sent_message_id = await self.sender.send_message(
+                chat_id, action.text or "", action.reply_to_message_id
+            )
+            # The message is already out. A failure in the post-send recording below
+            # must NOT count as a cycle failure (that would trip the circuit breaker for
+            # a send that actually succeeded) — log it and move on instead of re-raising.
+            try:
+                async with async_session_factory() as session:
+                    async with session.begin():
+                        memory = ConversationMemoryManager(session)
+                        if not first_text_done:
+                            first_text_done = True
+                            await self._record_behavioral_send(
+                                memory, prep, llm_out, action, sent_message_id, persisted_posture
+                            )
+                        else:
+                            # Burst follow-up: its own BotMemory row, no extra AiDecision.
+                            await memory.insert_bot_memory(
+                                chat_id=chat_id,
+                                sent_message_id=sent_message_id,
+                                response_text=action.text or "",
+                                reply_to_user_id=decision.reply_to_user_id,
+                                reply_to_message_id=action.reply_to_message_id,
+                                reasoning=decision.reasoning,
+                                tone_calibration=decision.tone_calibration,
+                                brief_snapshot=prep.brief.as_dict(),
+                                stances={},
+                                prompt_version=self.config.ai.prompt_version,
+                                cycle_snapshot_message_id=prep.snapshot_message_id,
+                                current_posture=persisted_posture,
+                            )
+            except Exception:
+                first_text_done = True  # send succeeded; treat the cycle as a success
+                await log.aexception(
+                    "behavioral_post_send_record_failed",
+                    chat_id=chat_id,
+                    sent_message_id=sent_message_id,
+                )
+
+        # If the plan produced no text send at all (e.g. react-only), still close the
+        # cycle out so the circuit breaker sees a success.
+        if not first_text_done:
+            async with async_session_factory() as session:
+                async with session.begin():
+                    memory = ConversationMemoryManager(session)
+                    await memory.record_cycle_success(chat_id)
+
+    async def _record_behavioral_send(
+        self,
+        memory: ConversationMemoryManager,
+        prep: _CyclePrep,
+        llm_out: _CycleLlmOutcome,
+        action: Action,
+        sent_message_id: int,
+        persisted_posture: str,
+    ) -> None:
+        """Record the canonical AiDecision + BotMemory + stances for the lead send,
+        matching what the original _finalize_cycle persists on a successful send."""
+        decision = llm_out.decision
+        stored_decision = await memory.insert_ai_decision(
+            chat_id=prep.chat_id,
+            prompt_version=self.config.ai.prompt_version,
+            snapshot_message_id=prep.snapshot_message_id,
+            new_message_count=prep.new_message_count,
+            should_respond=True,
+            confidence=decision.confidence,
+            response_text=action.text,
+            reply_to_message_id=action.reply_to_message_id,
+            reasoning=(
+                (decision.reasoning or "")
+                + (
+                    f" | posture update: {decision.updated_engagement_posture}"
+                    if decision.updated_engagement_posture
+                    else ""
+                )
+            ),
+            gate_score=prep.gate.gate_score,
+            gate_factors={**prep.gate.gate_factors, **prep.visible_numeric_controls},
+            request1_latency_ms=llm_out.request1.latency_ms,
+            request1_tokens_used=llm_out.request1.tokens_used,
+            request2_tokens_used=llm_out.request2.tokens_used,
+        )
+        await memory.update_ai_decision_sent_message(stored_decision.id, sent_message_id)
+        bot_memory = await memory.insert_bot_memory(
+            chat_id=prep.chat_id,
+            sent_message_id=sent_message_id,
+            response_text=action.text or "",
+            reply_to_user_id=decision.reply_to_user_id,
+            reply_to_message_id=action.reply_to_message_id,
+            reasoning=decision.reasoning,
+            tone_calibration=decision.tone_calibration,
+            brief_snapshot=prep.brief.as_dict(),
+            stances=decision.stances,
+            prompt_version=self.config.ai.prompt_version,
+            cycle_snapshot_message_id=prep.snapshot_message_id,
+            current_posture=persisted_posture,
+        )
+        await write_interaction_memory(
+            memory,
+            prep.chat_id,
+            decision.reply_to_user_id,
+            decision.topic,
+            action.text or "",
+        )
+        for topic, stance in decision.stances.items():
+            await memory.upsert_stance(
+                prep.chat_id, topic=topic, stance=str(stance), user_id=decision.reply_to_user_id
+            )
+            await write_stance_memory(
+                memory, prep.chat_id, decision.reply_to_user_id, topic, str(stance)
+            )
+        # Pass the caller's open session so the pending observation row commits
+        # atomically with this BotMemory write (no partial-failure window).
+        await self.feedback_loop.schedule_observation(
+            bot_memory.id, sent_message_id, prep.chat_id, session=memory.session
+        )
+        await memory.record_cycle_success(prep.chat_id)
+
     async def _has_new_user_followup_after_bot(
         self,
         memory: ConversationMemoryManager,
@@ -979,6 +1367,23 @@ class ConversationScheduler:
 async def main() -> None:
     config = load_engine_config()
     setup_logging()
+
+    if config.observe_only:
+        log.warning(
+            "OBSERVE_ONLY=true: conversation engine is passive — no perception, "
+            "decision, or sends. Ingestion + pipeline keep capturing and saving "
+            "every message to the DB. Idling."
+        )
+        try:
+            while True:
+                # Keep the compose healthcheck green even though no cycle runs,
+                # otherwise autoheal would restart-loop the idle container.
+                _touch_heartbeat()
+                await asyncio.sleep(60)
+        finally:
+            await dispose_engine()
+        return
+
     load_embedder(config.persona_engine.embedding_model)
     key = (config.xai_api_key or "").strip().lower()
     base = (config.xai_base_url or "").strip()
@@ -1015,7 +1420,10 @@ async def main() -> None:
 
     try:
         await run_bootstrap(config, ai_client, bot_user_id)
-        await asyncio.gather(scheduler.run(), feedback_loop.run_observation_tasks())
+        feedback_tasks = [feedback_loop.run_observation_tasks()]
+        if config.feedback_due_at_enabled:
+            feedback_tasks.append(feedback_loop.run_due_observation_loop())
+        await asyncio.gather(scheduler.run(), *feedback_tasks)
     finally:
         close = getattr(ai_client, "close", None)
         if close:
