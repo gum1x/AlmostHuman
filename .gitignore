@@ -21,11 +21,10 @@ client_secret*.json
 *.swo
 *~
 
-# Local model / research artifacts (uncomment if desired)
-# exports/
-# *.jsonl
-# tests/style_matching/*.jsonl
-# tests/style_matching/*.md
+# Ingested chat data / research exports — NEVER commit (contains third-party PII)
+exports/
+tests/style_matching/
+*.jsonl
 
 # Large training datasets (rebuildable from chat exports via scripts/) — do not commit
 data/*.jsonl
