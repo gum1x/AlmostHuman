@@ -12,6 +12,7 @@ from conversation_engine.handles import HandleMap
 # Redundancy detection
 # ---------------------------------------------------------------------------
 
+
 def _normalize_for_dedup(text: str) -> str:
     """Lowercase, strip punctuation/whitespace so trivial variations still count as identical."""
     return re.sub(r"[^a-z0-9]+", "", (text or "").lower())
@@ -63,7 +64,11 @@ def is_similar_response(
         if _jaccard(cur_set, set(prev_tokens)) >= jaccard_threshold:
             return True
         # Same multi-word opening => formulaic repeat.
-        if opener_words >= 3 and len(cur_tokens) >= opener_words and len(prev_tokens) >= opener_words:
+        if (
+            opener_words >= 3
+            and len(cur_tokens) >= opener_words
+            and len(prev_tokens) >= opener_words
+        ):
             if cur_opener == tuple(prev_tokens[:opener_words]):
                 return True
     return False
@@ -111,12 +116,12 @@ def reuses_recent_tic(text: str, recent_texts: Iterable[str]) -> bool:
 # Broad emoji/pictograph ranges (covers the 😭 💀 😱 family used in chat).
 _EMOJI_RE = re.compile(
     "["
-    "\U0001F300-\U0001FAFF"  # symbols, pictographs, supplemental, emoticons
-    "\U00002600-\U000027BF"  # misc symbols + dingbats
-    "\U0001F1E6-\U0001F1FF"  # regional indicators (flags)
-    "\U00002B00-\U00002BFF"  # arrows/stars
-    "\U0000FE00-\U0000FE0F"  # variation selectors
-    "\U0000200D"             # zero-width joiner
+    "\U0001f300-\U0001faff"  # symbols, pictographs, supplemental, emoticons
+    "\U00002600-\U000027bf"  # misc symbols + dingbats
+    "\U0001f1e6-\U0001f1ff"  # regional indicators (flags)
+    "\U00002b00-\U00002bff"  # arrows/stars
+    "\U0000fe00-\U0000fe0f"  # variation selectors
+    "\U0000200d"  # zero-width joiner
     "]+",
     flags=re.UNICODE,
 )
@@ -152,7 +157,7 @@ def enforce_emoji_budget(
     """
     if not text:
         return text
-    recent_window = list(recent_texts)[:max(0, window - 1)]
+    recent_window = list(recent_texts)[: max(0, window - 1)]
     recent_emoji_used = any(count_emojis(t) > 0 for t in recent_window)
     if recent_emoji_used:
         return strip_emojis(text)
@@ -215,7 +220,7 @@ def strip_terminal_period(text: str) -> str:
     if stripped.endswith("...") or not stripped.endswith("."):
         return text
     # Single trailing period only (not part of an ellipsis, guarded above).
-    trailing_ws = text[len(stripped):]
+    trailing_ws = text[len(stripped) :]
     return stripped[:-1] + trailing_ws
 
 
@@ -239,9 +244,9 @@ def apply_donor_terminal_punct(text: str, rng: random.Random) -> str:
         return text
     last = stripped[-1]
     if last == "!" and rng.random() < _STRIP_EXCLAIM_P:
-        return stripped[:-1].rstrip() + text[len(stripped):]
+        return stripped[:-1].rstrip() + text[len(stripped) :]
     if last == "?" and rng.random() < _STRIP_QUESTION_P:
-        return stripped[:-1].rstrip() + text[len(stripped):]
+        return stripped[:-1].rstrip() + text[len(stripped) :]
     return text
 
 
@@ -337,6 +342,7 @@ def enforce_ack_dedup(
 # ---------------------------------------------------------------------------
 # Main validation
 # ---------------------------------------------------------------------------
+
 
 def validate(
     decision: ResponseDecision,

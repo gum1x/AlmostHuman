@@ -103,9 +103,7 @@ def _last_ref_key(entry: dict) -> tuple[int, Any]:
     return (1, ref)
 
 
-def render_decision_capsule(
-    dossier: Any, display_name: str, max_tokens: int = 120
-) -> str:
+def render_decision_capsule(dossier: Any, display_name: str, max_tokens: int = 120) -> str:
     """Render a <=``max_tokens`` DISPOSITION line for the DECISION BRAIN.
 
     Disposition, not a fact dump: leads with relationship stance, then the
@@ -175,9 +173,7 @@ def select_voice_tone(dossier: Any) -> ToneCapsule:
     return capsule
 
 
-def select_callback(
-    dossier: Any, budget_remaining: int, rng: random.Random
-) -> str | None:
+def select_callback(dossier: Any, budget_remaining: int, rng: random.Random) -> str | None:
     """Pick the ONE specific entity/token to inject into the word-gen context.
 
     Returns ``None`` unless ``budget_remaining > 0`` AND there is a witnessed,

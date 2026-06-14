@@ -21,6 +21,7 @@ Nothing here sleeps or reads a clock on its own. Delays are returned as VALUES
 to be awaited outside the send transaction; every time-dependent function takes
 ``now``/``date`` as an argument.
 """
+
 from __future__ import annotations
 
 import math
@@ -38,15 +39,15 @@ from datetime import date, datetime, time, timedelta, timezone
 # sigma controls tail fatness. With sigma ~= 0.85 the p90 multiplier is
 # exp(1.2816 * 0.85) ~= 2.96, i.e. a typical p90 near 20 * 2.96 ~= 59s, which
 # sits inside the regular p90 band [51.8, 286.44]s while keeping p50 in band.
-_DELAY_MU = math.log(20.0)        # median ~20s for a "typical" length message
-_DELAY_SIGMA = 0.85               # tail fatness; tuned to keep p90 in band
+_DELAY_MU = math.log(20.0)  # median ~20s for a "typical" length message
+_DELAY_SIGMA = 0.85  # tail fatness; tuned to keep p90 in band
 
 # Length scaling: a regular skims a one-word reply fast and takes longer to
 # read+type a long one. We nudge mu by message length around a reference length
 # (donor word_count p50 = 3). Short msgs => slightly faster, long => slower.
 _REF_WORD_COUNT = 3.0
-_LEN_MU_GAIN = 0.18               # ln-seconds added per ln(words/ref); gentle
-_LEN_MU_CLAMP = 0.7               # cap the length nudge so it can't dominate
+_LEN_MU_GAIN = 0.18  # ln-seconds added per ln(words/ref); gentle
+_LEN_MU_CLAMP = 0.7  # cap the length nudge so it can't dominate
 
 # Normal-range clamp. 1s floor (no instant bot reflexes); 1800s (30min) ceiling
 # for the ordinary distribution.
@@ -60,7 +61,7 @@ _DELAY_CEIL = 1800.0
 # empirical share>30min is ~0.015 and share>1h is ~0.0075, both in band.
 _LONG_TAIL_PROB = 0.015
 _LONG_TAIL_MIN = 1801.0
-_LONG_TAIL_MAX = 5400.0           # 90min; most tail mass stays under 1h
+_LONG_TAIL_MAX = 5400.0  # 90min; most tail mass stays under 1h
 
 # ---------------------------------------------------------------------------
 # Dead-window (daily "sleep") constants
@@ -68,14 +69,14 @@ _LONG_TAIL_MAX = 5400.0           # 90min; most tail mass stays under 1h
 # The bot must go dark for a human-length block each day. Base window is a
 # ~7h block in UTC overlapping the donor's quietest hours; the regular's active
 # hours show a clear overnight lull. >=6h is enforced after jitter.
-_DEAD_BASE_START_HOUR = 3.0       # ~03:00 UTC nominal "bedtime"
-_DEAD_BASE_END_HOUR = 10.0        # ~10:00 UTC nominal "wake" (7h block)
+_DEAD_BASE_START_HOUR = 3.0  # ~03:00 UTC nominal "bedtime"
+_DEAD_BASE_END_HOUR = 10.0  # ~10:00 UTC nominal "wake" (7h block)
 # Per-date jitter of +/- ~1.5h on the START so the edge is never a fixed clock
 # tick. The END is derived from start + a (jittered) duration that stays >=6h.
 _DEAD_START_JITTER_H = 1.5
-_DEAD_DURATION_MIN_H = 6.0        # hard floor on sleep length
+_DEAD_DURATION_MIN_H = 6.0  # hard floor on sleep length
 _DEAD_DURATION_BASE_H = _DEAD_BASE_END_HOUR - _DEAD_BASE_START_HOUR  # 7.0
-_DEAD_DURATION_JITTER_H = 0.75    # +/- on duration, never dropping below the floor
+_DEAD_DURATION_JITTER_H = 0.75  # +/- on duration, never dropping below the floor
 
 # ---------------------------------------------------------------------------
 # Latency self-monitor constants
@@ -83,14 +84,15 @@ _DEAD_DURATION_JITTER_H = 0.75    # +/- on duration, never dropping below the fl
 # A fixed/near-fixed timer collapses latency variance. Real regulars have a
 # heavy-tailed spread: coefficient of variation (std/mean) well above ~0.5 and
 # a non-trivial IQR. We alarm when the emitted distribution is too uniform.
-_CV_MIN_HEALTHY = 0.45            # below this CV => suspiciously uniform
-_IQR_RATIO_MIN_HEALTHY = 0.20     # (p75-p25)/p50 below this => too tight
-_ALARM_MIN_SAMPLES = 8           # need enough samples to judge
+_CV_MIN_HEALTHY = 0.45  # below this CV => suspiciously uniform
+_IQR_RATIO_MIN_HEALTHY = 0.20  # (p75-p25)/p50 below this => too tight
+_ALARM_MIN_SAMPLES = 8  # need enough samples to judge
 
 
 # ---------------------------------------------------------------------------
 # Send delay
 # ---------------------------------------------------------------------------
+
 
 def _word_count(text: str) -> int:
     return len((text or "").split())
@@ -133,6 +135,7 @@ def compute_send_delay(
 # ---------------------------------------------------------------------------
 # Dead window (daily sleep)
 # ---------------------------------------------------------------------------
+
 
 def _date_jitter(d: date, seed: int, *, salt: int) -> float:
     """Deterministic [-1, 1] jitter for a (date, seed) pair.
@@ -223,6 +226,7 @@ def _as_utc(now: datetime) -> datetime:
 # ---------------------------------------------------------------------------
 # Latency self-monitor
 # ---------------------------------------------------------------------------
+
 
 def _percentile(sorted_vals: list[float], q: float) -> float:
     """Linear-interpolation percentile on a pre-sorted list (q in [0, 1])."""

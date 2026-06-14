@@ -34,8 +34,14 @@ def get_candidate_user_ids(enriched_messages: list[EnrichedMessage]) -> list[int
     return seen[:5]
 
 
-def get_active_thread_message_ids(enriched_messages: list[EnrichedMessage], brief: Brief | None) -> list[int]:
-    ids = {message.reply_to_message_id for message in enriched_messages[-20:] if message.reply_to_message_id}
+def get_active_thread_message_ids(
+    enriched_messages: list[EnrichedMessage], brief: Brief | None
+) -> list[int]:
+    ids = {
+        message.reply_to_message_id
+        for message in enriched_messages[-20:]
+        if message.reply_to_message_id
+    }
     if brief:
         ids.update(thread.root_message_id for thread in brief.active_threads)
     return [int(item) for item in ids if item is not None]
@@ -53,7 +59,9 @@ async def compute_gate_score(
     factors: dict[str, float | str] = {}
     gate_config = config.engagement_gate
 
-    recent_count = await memory.count_messages_in_window(chat_id, minutes=gate_config.velocity_window_minutes)
+    recent_count = await memory.count_messages_in_window(
+        chat_id, minutes=gate_config.velocity_window_minutes
+    )
     velocity = recent_count / gate_config.velocity_window_minutes
     factors["velocity"] = score_velocity(velocity)
 
@@ -72,7 +80,9 @@ async def compute_gate_score(
     factors["fatigue"] = 1.0 - fatigue
 
     candidate_users = get_candidate_user_ids(enriched_messages)
-    factors["relationship_strength"] = await memory.avg_relationship_strength(chat_id, candidate_users)
+    factors["relationship_strength"] = await memory.avg_relationship_strength(
+        chat_id, candidate_users
+    )
 
     factors["topic_alignment"] = max(
         (message.topic_overlap_score for message in enriched_messages),
@@ -82,7 +92,9 @@ async def compute_gate_score(
 
     now = datetime.now(timezone.utc)
     pattern = await memory.get_activity_pattern(chat_id, now.hour, now.weekday())
-    factors["historical_activity"] = min(pattern.avg_message_velocity / 5.0, 1.0) if pattern else 0.5
+    factors["historical_activity"] = (
+        min(pattern.avg_message_velocity / 5.0, 1.0) if pattern else 0.5
+    )
 
     active_thread_ids = get_active_thread_message_ids(enriched_messages, brief)
     recent_thread_responses = await memory.count_bot_responses_in_threads(
@@ -115,7 +127,9 @@ async def compute_gate_score(
     gate_score = sum(float(factors.get(key, 0.0)) * weight for key, weight in weights.items())
     gate_score = max(0.0, min(1.0, gate_score))
 
-    min_score = min_score_override if min_score_override is not None else gate_config.min_gate_score_to_send
+    min_score = (
+        min_score_override if min_score_override is not None else gate_config.min_gate_score_to_send
+    )
     should_proceed = gate_score >= min_score
     if responses_last_10min >= gate_config.max_group_responses_per_10min:
         should_proceed = False
@@ -126,5 +140,8 @@ async def compute_gate_score(
         gate_factors=factors,
         should_proceed=should_proceed,
     )
-    record_gate(result.gate_score, {key: float(value) for key, value in factors.items() if isinstance(value, int | float)})
+    record_gate(
+        result.gate_score,
+        {key: float(value) for key, value in factors.items() if isinstance(value, int | float)},
+    )
     return result

@@ -40,9 +40,14 @@ def count_negative_emojis(reactions: list[Reaction]) -> int:
     return sum(reaction.count for reaction in reactions if reaction.emoji in NEGATIVE_EMOJIS)
 
 
-async def ai_score_outcome(ai_client, replies: list[Any], reactions: list[Reaction], sentiment_shift: float) -> tuple[str, float]:
+async def ai_score_outcome(
+    ai_client, replies: list[Any], reactions: list[Reaction], sentiment_shift: float
+) -> tuple[str, float]:
     prompt, system = build_outcome_scoring_prompt(
-        replies=[getattr(reply, "text_cleaned", None) or getattr(reply, "text_raw", "") for reply in replies[:10]],
+        replies=[
+            getattr(reply, "text_cleaned", None) or getattr(reply, "text_raw", "")
+            for reply in replies[:10]
+        ],
         reactions=[reaction.__dict__ for reaction in reactions],
         sentiment_shift=sentiment_shift,
     )
@@ -88,7 +93,12 @@ async def score_outcome(
 
 
 def avg_vader_sentiment(messages: list[Any]) -> float:
-    values = [sentiment_score(getattr(message, "text_cleaned", None) or getattr(message, "text_raw", "") or "") for message in messages]
+    values = [
+        sentiment_score(
+            getattr(message, "text_cleaned", None) or getattr(message, "text_raw", "") or ""
+        )
+        for message in messages
+    ]
     return sum(values) / len(values) if values else 0.0
 
 
@@ -100,10 +110,14 @@ class FeedbackLoop:
         self._queue: asyncio.Queue[tuple[int, int, int]] = asyncio.Queue()
         self._shutdown = asyncio.Event()
 
-    async def schedule_observation(self, bot_memory_id: int, sent_message_id: int, chat_id: int, session=None) -> None:
+    async def schedule_observation(
+        self, bot_memory_id: int, sent_message_id: int, chat_id: int, session=None
+    ) -> None:
         if self.config.feedback_due_at_enabled:
             sent_at = utcnow()
-            due_at = sent_at + timedelta(minutes=self.config.feedback_loop.observation_window_minutes)
+            due_at = sent_at + timedelta(
+                minutes=self.config.feedback_loop.observation_window_minutes
+            )
             if session is not None:
                 # Caller owns the transaction (its surrounding `async with session.begin()`
                 # commits this row atomically with the send-recording write).
@@ -131,7 +145,9 @@ class FeedbackLoop:
     async def run_observation_tasks(self) -> None:
         while not self._shutdown.is_set():
             try:
-                bot_memory_id, sent_message_id, chat_id = await asyncio.wait_for(self._queue.get(), timeout=1.0)
+                bot_memory_id, sent_message_id, chat_id = await asyncio.wait_for(
+                    self._queue.get(), timeout=1.0
+                )
             except asyncio.TimeoutError:
                 continue
             asyncio.create_task(self.observe_response(bot_memory_id, sent_message_id, chat_id))
@@ -156,7 +172,9 @@ class FeedbackLoop:
         except Exception:
             return []
 
-    async def observe_response(self, bot_memory_id: int, sent_message_id: int, chat_id: int) -> None:
+    async def observe_response(
+        self, bot_memory_id: int, sent_message_id: int, chat_id: int
+    ) -> None:
         window_minutes = self.config.feedback_loop.observation_window_minutes
         window_start = utcnow()
         await asyncio.sleep(window_minutes * 60)
@@ -280,12 +298,15 @@ class FeedbackLoop:
                 except Exception as exc:
                     # Drop the failed observation (parity with legacy task loss) so it
                     # neither reprocesses nor lingers; one bad row can't wedge the loop.
-                    await log.aerror("feedback_due_observation_failed",
-                                     obs_id=obs["id"], error=str(exc))
+                    await log.aerror(
+                        "feedback_due_observation_failed", obs_id=obs["id"], error=str(exc)
+                    )
                     try:
                         async with async_session_factory() as session:
                             async with session.begin():
-                                await ConversationMemoryManager(session).delete_pending_observation(obs["id"])
+                                await ConversationMemoryManager(session).delete_pending_observation(
+                                    obs["id"]
+                                )
                     except Exception:
                         pass
             if self._shutdown.is_set():
@@ -302,7 +323,7 @@ def aggregate_feedback(feedback_rows: list[Any]) -> dict[str, Any]:
     by_outcome: dict[str, int] = defaultdict(int)
     direct_scores: list[float] = []
     ambient_scores: list[float] = []
-    short_scores: list[float] = []   # reply_count == 0 and reaction_count > 0
+    short_scores: list[float] = []  # reply_count == 0 and reaction_count > 0
     scores = []
     for row in feedback_rows:
         scores.append(row.outcome_score)
@@ -327,7 +348,9 @@ def aggregate_feedback(feedback_rows: list[Any]) -> dict[str, Any]:
     }
 
 
-async def run_meta_reflection(chat_id: int, memory: ConversationMemoryManager, ai_client, config: EngineConfig) -> None:
+async def run_meta_reflection(
+    chat_id: int, memory: ConversationMemoryManager, ai_client, config: EngineConfig
+) -> None:
     unprocessed = await memory.get_unprocessed_feedback(chat_id)
     if len(unprocessed) < 10:
         return
@@ -338,5 +361,7 @@ async def run_meta_reflection(chat_id: int, memory: ConversationMemoryManager, a
     for rec in parsed.updated_stance_recommendations:
         await memory.upsert_stance(chat_id, topic=rec.topic, stance=rec.recommended_approach)
     for pref in parsed.tone_preferences_by_user:
-        await memory.upsert_user_relationship(chat_id, pref.user_id, f"Preferred tone: {pref.preferred_tone}")
+        await memory.upsert_user_relationship(
+            chat_id, pref.user_id, f"Preferred tone: {pref.preferred_tone}"
+        )
     await memory.mark_feedback_reflected([row.id for row in unprocessed])

@@ -135,9 +135,13 @@ class EngineConfig:
     # path is byte-for-byte the original single-send finalize. Phase 3 builds on this seam.
     behavioral_layer_enabled: bool = False
     behavioral_allow_media: bool = False  # opt-in sticker/media sends (live media is unverified)
-    behavioral_burst_rate: float = 0.20   # self-burst split probability (output_planner)
-    behavioral_mention_rate: float = 0.0  # @-mention injection probability (validators.inject_mention)
-    behavioral_donor_lowercase_rate: float = 0.964  # donor casing coin-flip (validators.apply_donor_casing)
+    behavioral_burst_rate: float = 0.20  # self-burst split probability (output_planner)
+    behavioral_mention_rate: float = (
+        0.0  # @-mention injection probability (validators.inject_mention)
+    )
+    behavioral_donor_lowercase_rate: float = (
+        0.964  # donor casing coin-flip (validators.apply_donor_casing)
+    )
     behavioral_rng_seed: int | None = None  # fixed seed for determinism; None = per-process random
     # Phase 5: persist the 45-min delayed feedback observation to a DB-backed due-at table
     # (pending_observations) instead of an in-memory asyncio.Queue, so a process restart no
@@ -176,25 +180,31 @@ def load_engine_config(path: str | Path = "config.toml") -> EngineConfig:
         xai_api_key=os.getenv("XAI_API_KEY", ""),
         xai_base_url=os.getenv("XAI_BASE_URL", "https://api.x.ai/v1"),
         conversation_tg_session_name=os.getenv("CONVERSATION_TG_SESSION_NAME", "conversation"),
-        local_style_rewrite_enabled=os.getenv("LOCAL_STYLE_REWRITE_ENABLED", "false").lower() == "true",
+        local_style_rewrite_enabled=os.getenv("LOCAL_STYLE_REWRITE_ENABLED", "false").lower()
+        == "true",
         local_style_python=os.getenv("LOCAL_STYLE_PYTHON", "python3"),
         local_style_chat_script=os.getenv("LOCAL_STYLE_CHAT_SCRIPT", ""),
         local_style_model_path=os.getenv("LOCAL_STYLE_MODEL_PATH", ""),
         local_style_timeout_seconds=int(os.getenv("LOCAL_STYLE_TIMEOUT_SECONDS", "120")),
-        use_local_model_for_responses=os.getenv("USE_LOCAL_MODEL_FOR_RESPONSES", "false").lower() == "true",
+        use_local_model_for_responses=os.getenv("USE_LOCAL_MODEL_FOR_RESPONSES", "false").lower()
+        == "true",
         local_inference_mode=os.getenv("LOCAL_INFERENCE_MODE", "subprocess").lower(),
         local_inference_url=os.getenv("LOCAL_INFERENCE_URL", ""),
         voice_mode=os.getenv("VOICE_MODE", "standalone").lower(),
         emoji_window=int(os.getenv("EMOJI_WINDOW", "5")),
         timing_classifier_enabled=os.getenv("TIMING_CLASSIFIER_ENABLED", "false").lower() == "true",
-        timing_classifier_model_path=os.getenv("TIMING_CLASSIFIER_MODEL_PATH", "models/timing_classifier.json"),
+        timing_classifier_model_path=os.getenv(
+            "TIMING_CLASSIFIER_MODEL_PATH", "models/timing_classifier.json"
+        ),
         timing_classifier_threshold=float(os.getenv("TIMING_CLASSIFIER_THRESHOLD", "0.0")),
         cloud_brain_enabled=os.getenv("CLOUD_BRAIN_ENABLED", "true").lower() == "true",
         behavioral_layer_enabled=os.getenv("BEHAVIORAL_LAYER_ENABLED", "false").lower() == "true",
         behavioral_allow_media=os.getenv("BEHAVIORAL_ALLOW_MEDIA", "false").lower() == "true",
         behavioral_burst_rate=float(os.getenv("BEHAVIORAL_BURST_RATE", "0.20")),
         behavioral_mention_rate=float(os.getenv("BEHAVIORAL_MENTION_RATE", "0.0")),
-        behavioral_donor_lowercase_rate=float(os.getenv("BEHAVIORAL_DONOR_LOWERCASE_RATE", "0.964")),
+        behavioral_donor_lowercase_rate=float(
+            os.getenv("BEHAVIORAL_DONOR_LOWERCASE_RATE", "0.964")
+        ),
         behavioral_rng_seed=(
             int(os.environ["BEHAVIORAL_RNG_SEED"]) if os.getenv("BEHAVIORAL_RNG_SEED") else None
         ),

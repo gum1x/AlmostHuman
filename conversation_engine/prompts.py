@@ -189,8 +189,16 @@ def build_context_summary_prompt(
     prompt = f"{base}\n\n"
 
     if high_level_enriched or recent_enriched:
-        hl = format_enriched_for_context(high_level_enriched or [], 160) if high_level_enriched else "(none provided)"
-        rc = format_enriched_for_context(recent_enriched or [], 160) if recent_enriched else "(see target in context above)"
+        hl = (
+            format_enriched_for_context(high_level_enriched or [], 160)
+            if high_level_enriched
+            else "(none provided)"
+        )
+        rc = (
+            format_enriched_for_context(recent_enriched or [], 160)
+            if recent_enriched
+            else "(see target in context above)"
+        )
         prompt += f"""=== HIGH-LEVEL CONTEXT (last ~{len(high_level_enriched or [])} messages) ===
 {hl}
 
@@ -261,7 +269,9 @@ def build_reflection_prompt(
             "what_doesnt": "short summary",
             "tone_preferences_by_user": [{"user_id": "integer", "preferred_tone": "string"}],
             "topic_performance": [{"topic": "string", "verdict": "string"}],
-            "updated_stance_recommendations": [{"topic": "string", "recommended_approach": "string"}],
+            "updated_stance_recommendations": [
+                {"topic": "string", "recommended_approach": "string"}
+            ],
         },
     }
     if task not in schema_by_task:
@@ -328,7 +338,9 @@ def build_self_reflection_prompt(
     )
 
 
-def build_outcome_scoring_prompt(replies: list[str], reactions: list[dict[str, Any]], sentiment_shift: float) -> tuple[str, str]:
+def build_outcome_scoring_prompt(
+    replies: list[str], reactions: list[dict[str, Any]], sentiment_shift: float
+) -> tuple[str, str]:
     return build_reflection_prompt(
         "outcome_scoring",
         {
@@ -339,7 +351,9 @@ def build_outcome_scoring_prompt(replies: list[str], reactions: list[dict[str, A
     )
 
 
-def build_meta_reflection_prompt(feedback_count: int, aggregated_feedback: dict[str, Any]) -> tuple[str, str]:
+def build_meta_reflection_prompt(
+    feedback_count: int, aggregated_feedback: dict[str, Any]
+) -> tuple[str, str]:
     return build_reflection_prompt(
         "meta_reflection",
         {
@@ -349,7 +363,9 @@ def build_meta_reflection_prompt(feedback_count: int, aggregated_feedback: dict[
     )
 
 
-def build_style_rewrite_prompt(draft_response: str, target_context: str, config: EngineConfig) -> tuple[str, str]:
+def build_style_rewrite_prompt(
+    draft_response: str, target_context: str, config: EngineConfig
+) -> tuple[str, str]:
     prompt = f"""
 Rewrite this approved response into the group's Telegram style.
 

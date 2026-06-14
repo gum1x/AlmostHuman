@@ -34,7 +34,9 @@ _HARD_PATTERNS: tuple[re.Pattern[str], ...] = (
     # "are you a bot/ai", "r u a bot", "u a bot?"
     re.compile(r"\b(?:are|r)\s*(?:you|u|ya)\s+(?:a\s+)?(?:bot|ai|gpt|llm|chatgpt)\b"),
     # "you're a bot", "ur a bot", "youre an ai", "u are a bot"
-    re.compile(r"\b(?:you'?re|ur|youre|u\s*r|u\s+are|you\s+are)\s+(?:a|an)?\s*(?:bot|ai|gpt|llm|chatgpt)\b"),
+    re.compile(
+        r"\b(?:you'?re|ur|youre|u\s*r|u\s+are|you\s+are)\s+(?:a|an)?\s*(?:bot|ai|gpt|llm|chatgpt)\b"
+    ),
     # "this is ai", "thats a bot", "that's ai", "it's a bot", "this guy is a bot"
     re.compile(
         r"\b(?:this|that'?s|thats|its|it'?s|that|it)\s+"
@@ -46,19 +48,29 @@ _HARD_PATTERNS: tuple[re.Pattern[str], ...] = (
     # "bot detected", "ai detected", "bot confirmed"
     re.compile(r"\b(?:bot|ai|gpt)\s+(?:detected|confirmed|alert|spotted)\b"),
     # "literally a bot", "actual bot", "fucking bot/ai"
-    re.compile(r"\b(?:literally|actual(?:ly)?|fuckin'?g?|legit)\s+(?:a\s+|an\s+)?(?:bot|ai|chatgpt)\b"),
+    re.compile(
+        r"\b(?:literally|actual(?:ly)?|fuckin'?g?|legit)\s+(?:a\s+|an\s+)?(?:bot|ai|chatgpt)\b"
+    ),
     # "talking to a bot", "responding like a bot"
-    re.compile(r"\b(?:talking|replying|responding|typing)\s+(?:to\s+)?(?:like\s+)?(?:a\s+)?(?:bot|ai)\b"),
+    re.compile(
+        r"\b(?:talking|replying|responding|typing)\s+(?:to\s+)?(?:like\s+)?(?:a\s+)?(?:bot|ai)\b"
+    ),
 )
 
 # SOFT accusations: hedged / question-y suspicion, "is this even a real person",
 # "sus", "kinda ai", "smells like a bot" — real but deniable.
 _SOFT_PATTERNS: tuple[re.Pattern[str], ...] = (
     # "is this a real person", "are you even real", "are you human"
-    re.compile(r"\b(?:are|r)\s*(?:you|u|ya)\s+(?:even\s+)?(?:real|human|a\s+real\s+(?:person|human|guy))\b"),
-    re.compile(r"\bis\s+(?:this|that|he|she|it)\s+(?:even\s+)?(?:a\s+)?real\s+(?:person|human|guy|one)\b"),
+    re.compile(
+        r"\b(?:are|r)\s*(?:you|u|ya)\s+(?:even\s+)?(?:real|human|a\s+real\s+(?:person|human|guy))\b"
+    ),
+    re.compile(
+        r"\bis\s+(?:this|that|he|she|it)\s+(?:even\s+)?(?:a\s+)?real\s+(?:person|human|guy|one)\b"
+    ),
     # "sounds/feels/smells/reads like a bot/ai"
-    re.compile(r"\b(?:sounds?|feels?|smells?|reads?|looks?)\s+like\s+(?:a\s+|an\s+)?(?:bot|ai|chatgpt|gpt)\b"),
+    re.compile(
+        r"\b(?:sounds?|feels?|smells?|reads?|looks?)\s+like\s+(?:a\s+|an\s+)?(?:bot|ai|chatgpt|gpt)\b"
+    ),
     # "kinda/sorta bot", "lowkey ai", "sus bot"
     re.compile(r"\b(?:kinda|sorta|lowkey|highkey|sus(?:\s+as\s+fuck)?)\s+(?:a\s+)?(?:bot|ai)\b"),
     # "bot vibes", "ai vibes", "npc vibes"
@@ -109,8 +121,8 @@ def scan_for_accusation(
 # Quiet-period bands (seconds). Hard accusation => go dark for hours; soft => go
 # quiet for tens of minutes. Both jittered so the cooldown isn't a fixed,
 # fingerprintable interval.
-_HARD_DARK_RANGE = (90 * 60.0, 240 * 60.0)   # 1.5h .. 4h
-_SOFT_DARK_RANGE = (20 * 60.0, 60 * 60.0)    # 20min .. 1h
+_HARD_DARK_RANGE = (90 * 60.0, 240 * 60.0)  # 1.5h .. 4h
+_SOFT_DARK_RANGE = (20 * 60.0, 60 * 60.0)  # 20min .. 1h
 
 
 def go_dark_seconds(result: SuspicionResult, rng: random.Random) -> float:

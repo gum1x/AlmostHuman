@@ -94,7 +94,9 @@ class LocalStyleRewriter:
         prompt = self._build_voice_prompt(context=context)
         return await self._run_local_model(prompt, log_event="local_voice_generate")
 
-    async def phrase(self, *, context: str, plan: str, target_message: str = "", tone: str = "") -> str:
+    async def phrase(
+        self, *, context: str, plan: str, target_message: str = "", tone: str = ""
+    ) -> str:
         """Core hybrid path: local fine-tuned model phrases the actual reply text.
 
         Smart model (Grok) provides the high-level control: the 'plan' (what we are actually doing,
@@ -120,10 +122,14 @@ class LocalStyleRewriter:
         if mode == "http":
             url = getattr(self.config, "local_inference_url", "")
             if not url:
-                await log.awarning(f"{log_event}_failed", error="LOCAL_INFERENCE_URL not set for http mode")
+                await log.awarning(
+                    f"{log_event}_failed", error="LOCAL_INFERENCE_URL not set for http mode"
+                )
                 return ""
             try:
-                async with httpx.AsyncClient(timeout=self.config.local_style_timeout_seconds) as client:
+                async with httpx.AsyncClient(
+                    timeout=self.config.local_style_timeout_seconds
+                ) as client:
                     resp = await client.post(
                         url,
                         json={
@@ -147,8 +153,7 @@ class LocalStyleRewriter:
         python_path = self.config.local_style_python or ""
         if not python_path or not os.path.exists(python_path):
             await log.awarning(
-                f"{log_event}_failed",
-                error=f"Subprocess python not available: {python_path}"
+                f"{log_event}_failed", error=f"Subprocess python not available: {python_path}"
             )
             return ""
 
@@ -203,8 +208,7 @@ class LocalStyleRewriter:
         ctx = (context or "").strip()
         # Keep only genuine chat lines; drop engine scaffolding the voice model never saw.
         chat_lines = [
-            ln.strip() for ln in ctx.splitlines()
-            if self._VOICE_LINE_RE.match(ln.strip())
+            ln.strip() for ln in ctx.splitlines() if self._VOICE_LINE_RE.match(ln.strip())
         ]
         if chat_lines:
             return "\n".join(chat_lines[-2:])

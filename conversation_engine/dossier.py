@@ -149,11 +149,7 @@ def is_assertable(entry: DossierEntry, min_corroboration: int = 2) -> bool:
 
 def is_voiceable_joke(entry: DossierEntry) -> bool:
     """True when a running_joke may be voiced AS A JOKE (witnessed + corroborated)."""
-    return (
-        entry.type == "running_joke"
-        and entry.witnessed
-        and entry.corroboration_count >= 2
-    )
+    return entry.type == "running_joke" and entry.witnessed and entry.corroboration_count >= 2
 
 
 def corroborate(

@@ -32,7 +32,14 @@ _WORD_CLAMP = 18
 # A per-message budget drawn from this pulls the generator's length distribution onto
 # the donor's instead of letting kimi default to fuller sentences (the residual
 # char_len/word_count tell the n=237 A/B exposed).
-_LEN_CDF_ANCHORS = ((0.0, 1.0), (0.269, 1.0), (0.5, 3.0), (0.75, 5.0), (0.9, 8.0), (1.0, float(_WORD_CLAMP)))
+_LEN_CDF_ANCHORS = (
+    (0.0, 1.0),
+    (0.269, 1.0),
+    (0.5, 3.0),
+    (0.75, 5.0),
+    (0.9, 8.0),
+    (1.0, float(_WORD_CLAMP)),
+)
 
 
 def _sample_word_budget(rng: random.Random, anchors=_LEN_CDF_ANCHORS) -> int:
@@ -69,10 +76,10 @@ def build_recent_lines(
     for m in enriched_messages or []:
         if isinstance(m, dict):
             sid = m.get("sender_id")
-            txt = (m.get("cleaned_text") or m.get("text") or "")
+            txt = m.get("cleaned_text") or m.get("text") or ""
         else:
             sid = getattr(m, "sender_id", None)
-            txt = (getattr(m, "cleaned_text", None) or getattr(m, "text", None) or "")
+            txt = getattr(m, "cleaned_text", None) or getattr(m, "text", None) or ""
         txt = (txt or "").strip()
         if sid is None or not txt:
             continue
@@ -155,9 +162,7 @@ class WordGenerator:
         lc = stats.get("lowercase_rate", 0.964)
         med = (stats.get("word_count_p25_50_75_90") or [1, 3, 5, 8])[1]
         few_shot = "\n".join(f"- {ex}" for ex in self.exemplars)
-        tone_line = (
-            f"register: {tone.register}; relationship: {tone.relationship_stage}"
-        )
+        tone_line = f"register: {tone.register}; relationship: {tone.relationship_stage}"
         if tone.address_form:
             tone_line += f"; address them as: {tone.address_form}"
         intent_line = f"\nwhat you want to get across: {intent_tag}" if intent_tag else ""
@@ -178,7 +183,9 @@ class WordGenerator:
         )
 
     def _user_message(
-        self, recent_lines: list[str], reply_target_line: str | None,
+        self,
+        recent_lines: list[str],
+        reply_target_line: str | None,
         word_budget: int | None = None,
     ) -> str:
         window = "\n".join(recent_lines) if recent_lines else "(no recent messages)"
@@ -208,7 +215,10 @@ class WordGenerator:
 
         messages = [
             {"role": "system", "content": self._system_prompt(tone, intent_tag)},
-            {"role": "user", "content": self._user_message(recent_lines, reply_target_line, word_budget)},
+            {
+                "role": "user",
+                "content": self._user_message(recent_lines, reply_target_line, word_budget),
+            },
         ]
 
         text = await self._call(messages)

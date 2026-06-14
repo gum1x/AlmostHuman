@@ -138,7 +138,6 @@ def _append_context_block(context, title: str, body: str):
     )
 
 
-
 class ConversationScheduler:
     def __init__(
         self,
@@ -207,9 +206,7 @@ class ConversationScheduler:
                 done_ids = [chat_id for chat_id, task in tasks.items() if task.done()]
                 for chat_id in done_ids:
                     tasks.pop(chat_id, None)
-                await self._sleep_interruptible(
-                    self.config.scheduler.dm_discovery_interval_seconds
-                )
+                await self._sleep_interruptible(self.config.scheduler.dm_discovery_interval_seconds)
         finally:
             for task in tasks.values():
                 task.cancel()
@@ -398,7 +395,9 @@ class ConversationScheduler:
         latest_decision = await memory.get_latest_ai_decision(chat_id)
         snapshot_before = latest_decision.snapshot_message_id if latest_decision else None
         new_message_count = await memory.count_messages_after_snapshot(chat_id, snapshot_before)
-        active_bot_thread = await self._has_new_user_followup_after_bot(memory, chat_id, snapshot_before)
+        active_bot_thread = await self._has_new_user_followup_after_bot(
+            memory, chat_id, snapshot_before
+        )
         if new_message_count < new_message_threshold:
             if not active_bot_thread:
                 return self._backoff_interval(previous_interval)
@@ -413,9 +412,13 @@ class ConversationScheduler:
         high_level_messages = await memory.get_recent_messages(chat_id, limit=high_level_limit)
         high_level_enriched = enrich_messages(high_level_messages, self.config.prompt)
         recent_context_limit = self.config.scheduler.recent_context_limit
-        recent_for_summary = high_level_messages[-recent_context_limit:] if high_level_messages else messages
+        recent_for_summary = (
+            high_level_messages[-recent_context_limit:] if high_level_messages else messages
+        )
         recent_enriched_for_summary = (
-            enrich_messages(recent_for_summary, self.config.prompt) if recent_for_summary else enriched
+            enrich_messages(recent_for_summary, self.config.prompt)
+            if recent_for_summary
+            else enriched
         )
 
         recent_bot_mem = await memory.get_recent_bot_memory(chat_id, limit=6)
@@ -426,15 +429,21 @@ class ConversationScheduler:
                     f"I said (to user_{bm.reply_to_user_id or '?'}): {bm.response_text[:120]}"
                 )
                 if bm.reasoning:
-                    recent_activity_lines.append(f"  (my reasoning at the time: {bm.reasoning[:100]})")
+                    recent_activity_lines.append(
+                        f"  (my reasoning at the time: {bm.reasoning[:100]})"
+                    )
                 if getattr(bm, "current_posture", None):
                     recent_activity_lines.append(f"  (my posture after: {bm.current_posture})")
         recent_bot_activity = "\n".join(recent_activity_lines) if recent_activity_lines else ""
-        bot_sent_ids = {bm.sent_message_id for bm in recent_bot_mem if bm.sent_message_id is not None}
+        bot_sent_ids = {
+            bm.sent_message_id for bm in recent_bot_mem if bm.sent_message_id is not None
+        }
 
         brief = build_brief(enriched)
         if is_private_dm:
-            gate = GateResult(gate_score=1.0, gate_factors={"mode": "private_dm"}, should_proceed=True)
+            gate = GateResult(
+                gate_score=1.0, gate_factors={"mode": "private_dm"}, should_proceed=True
+            )
         else:
             gate = await compute_gate_score(chat_id, enriched, brief, memory, self.config)
 
@@ -449,7 +458,8 @@ class ConversationScheduler:
             chat_id,
             hour_of_day=now.hour,
             day_of_week=now.weekday(),
-            velocity=new_message_count / max(1, self.config.engagement_gate.velocity_window_minutes),
+            velocity=new_message_count
+            / max(1, self.config.engagement_gate.velocity_window_minutes),
             tension=brief.tension_level,
         )
 
@@ -539,7 +549,10 @@ class ConversationScheduler:
                 if override_suppressed is not None:
                     gate = GateResult(
                         gate_score=gate.gate_score,
-                        gate_factors={**gate.gate_factors, "direct_override_suppressed": override_suppressed},
+                        gate_factors={
+                            **gate.gate_factors,
+                            "direct_override_suppressed": override_suppressed,
+                        },
                         should_proceed=False,
                     )
                     await log.ainfo(
@@ -668,7 +681,9 @@ class ConversationScheduler:
         if prep.recent_bot_mem:
             latest_bot_ts = getattr(prep.recent_bot_mem[0], "created_at", None)
             if latest_bot_ts:
-                time_since_last_bot = (datetime.now(timezone.utc) - latest_bot_ts).total_seconds() / 60.0
+                time_since_last_bot = (
+                    datetime.now(timezone.utc) - latest_bot_ts
+                ).total_seconds() / 60.0
 
         quant_signals = compute_quantitative_signals(
             enriched_messages=prep.enriched,
@@ -795,7 +810,9 @@ class ConversationScheduler:
                 decision.reasoning = "local_only_mode: voice model returned empty"
         else:
             decision.should_respond = False
-            decision.reasoning = "local_only_mode: style_rewriter disabled (no local voice available)"
+            decision.reasoning = (
+                "local_only_mode: style_rewriter disabled (no local voice available)"
+            )
 
         recent_bot_texts = [
             bm.response_text for bm in prep.recent_bot_mem if getattr(bm, "response_text", None)
@@ -897,7 +914,9 @@ class ConversationScheduler:
             await memory.upsert_stance(
                 prep.chat_id, topic=topic, stance=str(stance), user_id=decision.reply_to_user_id
             )
-            await write_stance_memory(memory, prep.chat_id, decision.reply_to_user_id, topic, str(stance))
+            await write_stance_memory(
+                memory, prep.chat_id, decision.reply_to_user_id, topic, str(stance)
+            )
         await self.feedback_loop.schedule_observation(bot_memory.id, sent_message_id, prep.chat_id)
         await memory.record_cycle_success(prep.chat_id)
         return self.config.scheduler.initial_interval_seconds
@@ -948,9 +967,7 @@ class ConversationScheduler:
         if dark_until is not None and now < dark_until:
             return "suspicion_dark_cooldown"
         # Suspicion: if the room is accusing a bot, go dark instead of replying.
-        recent_texts = [
-            (m.cleaned_text or m.text or "") for m in prep.enriched
-        ]
+        recent_texts = [(m.cleaned_text or m.text or "") for m in prep.enriched]
         suspicion = suspicion_monitor.scan_for_accusation(
             recent_texts, bot_username=self.bot_username
         )
@@ -994,9 +1011,7 @@ class ConversationScheduler:
         if not prep.is_private_dm:
             suppress_reason = self._behavioral_suppress_reason(prep, llm_out, now)
             if suppress_reason:
-                await log.ainfo(
-                    "behavioral_suppress", chat_id=chat_id, reason=suppress_reason
-                )
+                await log.ainfo("behavioral_suppress", chat_id=chat_id, reason=suppress_reason)
                 await self._record_behavioral_decline(prep, llm_out, suppress_reason)
                 return self.config.scheduler.initial_interval_seconds
 

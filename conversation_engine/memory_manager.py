@@ -84,7 +84,9 @@ class ConversationMemoryManager:
         speaking_style: str,
         embedding: list[float] | None,
     ) -> BotPersonaCore:
-        result = await self.session.execute(select(BotPersonaCore).order_by(BotPersonaCore.id.desc()).limit(1))
+        result = await self.session.execute(
+            select(BotPersonaCore).order_by(BotPersonaCore.id.desc()).limit(1)
+        )
         existing = result.scalar_one_or_none()
         if existing:
             return existing
@@ -100,10 +102,14 @@ class ConversationMemoryManager:
         return row
 
     async def get_persona_core(self) -> BotPersonaCore | None:
-        result = await self.session.execute(select(BotPersonaCore).order_by(BotPersonaCore.version.desc()).limit(1))
+        result = await self.session.execute(
+            select(BotPersonaCore).order_by(BotPersonaCore.version.desc()).limit(1)
+        )
         return result.scalar_one_or_none()
 
-    async def update_persona_core(self, updated_summary: str, embedding: list[float] | None) -> None:
+    async def update_persona_core(
+        self, updated_summary: str, embedding: list[float] | None
+    ) -> None:
         persona = await self.get_persona_core()
         if not persona:
             return
@@ -149,7 +155,9 @@ class ConversationMemoryManager:
             stmt = (
                 select(BotVectorMemory)
                 .where(BotVectorMemory.chat_id == chat_id)
-                .order_by(BotVectorMemory.importance_score.desc(), BotVectorMemory.created_at.desc())
+                .order_by(
+                    BotVectorMemory.importance_score.desc(), BotVectorMemory.created_at.desc()
+                )
                 .limit(top_k)
             )
             result = await self.session.execute(stmt)
@@ -159,14 +167,16 @@ class ConversationMemoryManager:
             ]
 
         try:
-            distance = BotVectorMemory.embedding.cosine_distance(normalize_embedding(query_embedding))
+            distance = BotVectorMemory.embedding.cosine_distance(
+                normalize_embedding(query_embedding)
+            )
             similarity = (1 - distance).label("similarity")
             # Ebbinghaus decay: recency weight = exp(-0.05 * days_since_created)
             # Older memories decay in rank so recent context dominates.
-            days_old = func.extract(
-                "epoch", func.now() - BotVectorMemory.created_at
-            ) / 86400.0
-            score = ((1 - distance) * BotVectorMemory.importance_score * func.exp(-0.05 * days_old)).label("score")
+            days_old = func.extract("epoch", func.now() - BotVectorMemory.created_at) / 86400.0
+            score = (
+                (1 - distance) * BotVectorMemory.importance_score * func.exp(-0.05 * days_old)
+            ).label("score")
             stmt: Select = (
                 select(
                     BotVectorMemory.content,
@@ -181,7 +191,9 @@ class ConversationMemoryManager:
             )
             result = await self.session.execute(stmt)
             return [
-                RetrievedMemory(row.content, row.memory_type, row.importance_score, float(row.similarity or 0.0))
+                RetrievedMemory(
+                    row.content, row.memory_type, row.importance_score, float(row.similarity or 0.0)
+                )
                 for row in result.all()
             ]
         except AttributeError:
@@ -221,7 +233,10 @@ class ConversationMemoryManager:
 
     async def get_recent_bot_memory(self, chat_id: int, limit: int = 50) -> list[BotMemory]:
         result = await self.session.execute(
-            select(BotMemory).where(BotMemory.chat_id == chat_id).order_by(BotMemory.sent_at.desc()).limit(limit)
+            select(BotMemory)
+            .where(BotMemory.chat_id == chat_id)
+            .order_by(BotMemory.sent_at.desc())
+            .limit(limit)
         )
         return list(result.scalars().all())
 
@@ -278,8 +293,9 @@ class ConversationMemoryManager:
     async def get_avg_feedback_score(self, chat_id: int, window_hours: int = 24) -> float:
         since = utcnow() - timedelta(hours=window_hours)
         result = await self.session.execute(
-            select(func.avg(ResponseFeedback.outcome_score))
-            .where(ResponseFeedback.chat_id == chat_id, ResponseFeedback.scored_at >= since)
+            select(func.avg(ResponseFeedback.outcome_score)).where(
+                ResponseFeedback.chat_id == chat_id, ResponseFeedback.scored_at >= since
+            )
         )
         value = result.scalar_one_or_none()
         return float(value or 0.0)
@@ -313,7 +329,9 @@ class ConversationMemoryManager:
         await self.session.flush()
         return row
 
-    async def get_unprocessed_feedback(self, chat_id: int, limit: int = 100) -> list[ResponseFeedback]:
+    async def get_unprocessed_feedback(
+        self, chat_id: int, limit: int = 100
+    ) -> list[ResponseFeedback]:
         result = await self.session.execute(
             select(ResponseFeedback)
             .where(ResponseFeedback.chat_id == chat_id, ResponseFeedback.meta_reflected.is_(False))
@@ -326,7 +344,9 @@ class ConversationMemoryManager:
         if not feedback_ids:
             return
         await self.session.execute(
-            update(ResponseFeedback).where(ResponseFeedback.id.in_(feedback_ids)).values(meta_reflected=True)
+            update(ResponseFeedback)
+            .where(ResponseFeedback.id.in_(feedback_ids))
+            .values(meta_reflected=True)
         )
 
     async def insert_pending_observation(
@@ -479,10 +499,14 @@ class ConversationMemoryManager:
         existing.relationship_strength = max(
             0.0, min(1.0, float(existing.relationship_strength or 0.0) + step)
         )
-        existing.sentiment_trend = (1 - alpha) * float(existing.sentiment_trend or 0.0) + alpha * reply_sentiment
+        existing.sentiment_trend = (1 - alpha) * float(
+            existing.sentiment_trend or 0.0
+        ) + alpha * reply_sentiment
         existing.last_interaction_at = utcnow()
 
-    async def get_relationship_profiles(self, chat_id: int, user_ids: list[int]) -> list[UserRelationshipProfile]:
+    async def get_relationship_profiles(
+        self, chat_id: int, user_ids: list[int]
+    ) -> list[UserRelationshipProfile]:
         if not user_ids:
             return []
         result = await self.session.execute(
@@ -566,7 +590,9 @@ class ConversationMemoryManager:
         reasoning text contains the literal "[callback]" tag.
         """
         result = await self.session.execute(
-            select(func.count()).select_from(BotMemory).where(
+            select(func.count())
+            .select_from(BotMemory)
+            .where(
                 BotMemory.chat_id == chat_id,
                 BotMemory.sent_at >= since,
                 BotMemory.reasoning.contains("[callback]"),
@@ -585,7 +611,9 @@ class ConversationMemoryManager:
     async def count_messages_in_window(self, chat_id: int, minutes: int) -> int:
         since = utcnow() - timedelta(minutes=minutes)
         result = await self.session.execute(
-            select(func.count()).select_from(Message).where(
+            select(func.count())
+            .select_from(Message)
+            .where(
                 Message.chat_id == chat_id,
                 Message.timestamp >= since,
                 Message.is_deleted.is_(False),
@@ -596,7 +624,9 @@ class ConversationMemoryManager:
     async def count_bot_responses(self, chat_id: int, window_minutes: int) -> int:
         since = utcnow() - timedelta(minutes=window_minutes)
         result = await self.session.execute(
-            select(func.count()).select_from(BotMemory).where(BotMemory.chat_id == chat_id, BotMemory.sent_at >= since)
+            select(func.count())
+            .select_from(BotMemory)
+            .where(BotMemory.chat_id == chat_id, BotMemory.sent_at >= since)
         )
         return int(result.scalar_one())
 
@@ -610,7 +640,9 @@ class ConversationMemoryManager:
             return 0
         since = utcnow() - timedelta(minutes=window_minutes)
         result = await self.session.execute(
-            select(func.count()).select_from(BotMemory).where(
+            select(func.count())
+            .select_from(BotMemory)
+            .where(
                 BotMemory.chat_id == chat_id,
                 BotMemory.reply_to_message_id.in_(thread_message_ids),
                 BotMemory.sent_at >= since,
@@ -620,15 +652,24 @@ class ConversationMemoryManager:
 
     async def get_latest_brief(self, chat_id: int) -> BriefCache | None:
         result = await self.session.execute(
-            select(BriefCache).where(BriefCache.chat_id == chat_id).order_by(BriefCache.created_at.desc()).limit(1)
+            select(BriefCache)
+            .where(BriefCache.chat_id == chat_id)
+            .order_by(BriefCache.created_at.desc())
+            .limit(1)
         )
         return result.scalar_one_or_none()
 
-    async def get_activity_pattern(self, chat_id: int, hour: int, day: int | None = None) -> ChatActivityPattern | None:
-        stmt = select(ChatActivityPattern).where(ChatActivityPattern.chat_id == chat_id, ChatActivityPattern.hour_of_day == hour)
+    async def get_activity_pattern(
+        self, chat_id: int, hour: int, day: int | None = None
+    ) -> ChatActivityPattern | None:
+        stmt = select(ChatActivityPattern).where(
+            ChatActivityPattern.chat_id == chat_id, ChatActivityPattern.hour_of_day == hour
+        )
         if day is not None:
             stmt = stmt.where(ChatActivityPattern.day_of_week == day)
-        result = await self.session.execute(stmt.order_by(ChatActivityPattern.sample_count.desc()).limit(1))
+        result = await self.session.execute(
+            stmt.order_by(ChatActivityPattern.sample_count.desc()).limit(1)
+        )
         return result.scalar_one_or_none()
 
     async def upsert_activity_pattern(
@@ -721,18 +762,31 @@ class ConversationMemoryManager:
         return row
 
     async def update_ai_decision_sent_message(self, decision_id: int, sent_message_id: int) -> None:
-        await self.session.execute(update(AiDecision).where(AiDecision.id == decision_id).values(sent_message_id=sent_message_id))
+        await self.session.execute(
+            update(AiDecision)
+            .where(AiDecision.id == decision_id)
+            .values(sent_message_id=sent_message_id)
+        )
 
     async def get_latest_ai_decision(self, chat_id: int) -> AiDecision | None:
         result = await self.session.execute(
-            select(AiDecision).where(AiDecision.chat_id == chat_id).order_by(AiDecision.evaluated_at.desc()).limit(1)
+            select(AiDecision)
+            .where(AiDecision.chat_id == chat_id)
+            .order_by(AiDecision.evaluated_at.desc())
+            .limit(1)
         )
         return result.scalar_one_or_none()
 
-    async def count_messages_after_snapshot(self, chat_id: int, snapshot_message_id: int | None) -> int:
-        stmt = select(func.count()).select_from(Message).where(
-            Message.chat_id == chat_id,
-            Message.is_deleted.is_(False),
+    async def count_messages_after_snapshot(
+        self, chat_id: int, snapshot_message_id: int | None
+    ) -> int:
+        stmt = (
+            select(func.count())
+            .select_from(Message)
+            .where(
+                Message.chat_id == chat_id,
+                Message.is_deleted.is_(False),
+            )
         )
         if snapshot_message_id is not None:
             stmt = stmt.where(Message.message_id > snapshot_message_id)
@@ -767,7 +821,9 @@ class ConversationMemoryManager:
         )
 
     async def is_circuit_paused(self, chat_id: int) -> bool:
-        result = await self.session.execute(select(CircuitBreakerState).where(CircuitBreakerState.chat_id == chat_id))
+        result = await self.session.execute(
+            select(CircuitBreakerState).where(CircuitBreakerState.chat_id == chat_id)
+        )
         state = result.scalar_one_or_none()
         return bool(state and state.paused_until and state.paused_until > utcnow())
 
@@ -779,7 +835,9 @@ class ConversationMemoryManager:
         )
         await self.session.execute(stmt)
 
-    async def record_cycle_failure(self, chat_id: int, failure_threshold: int, pause_minutes: int) -> None:
+    async def record_cycle_failure(
+        self, chat_id: int, failure_threshold: int, pause_minutes: int
+    ) -> None:
         stmt = insert(CircuitBreakerState).values(
             chat_id=chat_id,
             failure_count=1,
@@ -799,8 +857,12 @@ class ConversationMemoryManager:
         )
         await self.session.execute(stmt)
 
-    async def upsert_stance(self, chat_id: int, topic: str, stance: str, user_id: int | None = None) -> None:
-        self.session.add(StanceTracker(chat_id=chat_id, topic=topic, stance=stance, user_id=user_id))
+    async def upsert_stance(
+        self, chat_id: int, topic: str, stance: str, user_id: int | None = None
+    ) -> None:
+        self.session.add(
+            StanceTracker(chat_id=chat_id, topic=topic, stance=stance, user_id=user_id)
+        )
 
     async def get_recent_messages(self, chat_id: int, limit: int = 100) -> list[Message]:
         result = await self.session.execute(
@@ -811,7 +873,9 @@ class ConversationMemoryManager:
         )
         return list(reversed(result.scalars().all()))
 
-    async def get_recent_private_chat_ids(self, limit: int = 25, active_within_minutes: int = 24 * 60) -> list[int]:
+    async def get_recent_private_chat_ids(
+        self, limit: int = 25, active_within_minutes: int = 24 * 60
+    ) -> list[int]:
         since = utcnow() - timedelta(minutes=active_within_minutes)
         result = await self.session.execute(
             select(Message.chat_id, func.max(Message.timestamp).label("last_message_at"))
@@ -826,7 +890,9 @@ class ConversationMemoryManager:
         )
         return [int(row.chat_id) for row in result.all()]
 
-    async def get_messages_after(self, chat_id: int, sent_message_id: int, sent_at: datetime, window_minutes: int) -> list[Message]:
+    async def get_messages_after(
+        self, chat_id: int, sent_message_id: int, sent_at: datetime, window_minutes: int
+    ) -> list[Message]:
         result = await self.session.execute(
             select(Message)
             .where(
@@ -840,7 +906,9 @@ class ConversationMemoryManager:
         )
         return list(result.scalars().all())
 
-    async def get_messages_before(self, chat_id: int, sent_message_id: int, limit: int = 20) -> list[Message]:
+    async def get_messages_before(
+        self, chat_id: int, sent_message_id: int, limit: int = 20
+    ) -> list[Message]:
         result = await self.session.execute(
             select(Message)
             .where(
@@ -885,16 +953,24 @@ class ConversationMemoryManager:
         )
         return list(result.scalars().all())
 
-    async def backfill_bot_memory_from_messages(self, chat_id: int, bot_user_id: int, prompt_version: str) -> int:
+    async def backfill_bot_memory_from_messages(
+        self, chat_id: int, bot_user_id: int, prompt_version: str
+    ) -> int:
         result = await self.session.execute(
             select(Message)
-            .where(Message.chat_id == chat_id, Message.sender_id == bot_user_id, Message.is_deleted.is_(False))
+            .where(
+                Message.chat_id == chat_id,
+                Message.sender_id == bot_user_id,
+                Message.is_deleted.is_(False),
+            )
             .order_by(Message.timestamp.asc())
         )
         count = 0
         for message in result.scalars().all():
             exists = await self.session.execute(
-                select(func.count()).select_from(BotMemory).where(
+                select(func.count())
+                .select_from(BotMemory)
+                .where(
                     BotMemory.chat_id == chat_id,
                     BotMemory.sent_message_id == message.message_id,
                 )
@@ -923,7 +999,9 @@ class ConversationMemoryManager:
 
     async def count_summaries(self, chat_id: int) -> int:
         result = await self.session.execute(
-            select(func.count()).select_from(ConversationSummary).where(ConversationSummary.chat_id == chat_id)
+            select(func.count())
+            .select_from(ConversationSummary)
+            .where(ConversationSummary.chat_id == chat_id)
         )
         return int(result.scalar_one())
 

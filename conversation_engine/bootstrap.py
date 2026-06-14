@@ -14,7 +14,9 @@ log = get_logger(__name__)
 def _summarize_messages(messages) -> str:
     if not messages:
         return ""
-    lines = [f"user_{msg.sender_id}: {msg.text_cleaned or msg.text_raw or ''}" for msg in messages[-30:]]
+    lines = [
+        f"user_{msg.sender_id}: {msg.text_cleaned or msg.text_raw or ''}" for msg in messages[-30:]
+    ]
     return "\n".join(lines)[:4000]
 
 
@@ -38,7 +40,10 @@ async def bootstrap_chat(
                         chunk_start_message_id=messages[0].message_id,
                         chunk_end_message_id=messages[-1].message_id,
                         summary=_summarize_messages(messages),
-                        token_count=sum(len((msg.text_cleaned or msg.text_raw or "").split()) for msg in messages),
+                        token_count=sum(
+                            len((msg.text_cleaned or msg.text_raw or "").split())
+                            for msg in messages
+                        ),
                     )
 
             backfilled = 0
@@ -65,7 +70,9 @@ async def run_bootstrap(config: EngineConfig, ai_client, bot_user_id: int | None
     load_embedder(config.persona_engine.embedding_model)
     for chat_id in config.active_chat_ids:
         backfilled = await bootstrap_chat(chat_id, config, ai_client, bot_user_id)
-        await log.ainfo("conversation_bootstrap_chat_complete", chat_id=chat_id, backfilled=backfilled)
+        await log.ainfo(
+            "conversation_bootstrap_chat_complete", chat_id=chat_id, backfilled=backfilled
+        )
 
 
 async def main() -> None:
