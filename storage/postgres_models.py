@@ -352,6 +352,9 @@ class UserRelationshipProfile(Base):
     receptiveness_score: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     embedding: Mapped[list[float] | None] = mapped_column(Vector(384), nullable=True)
+    dossier: Mapped[dict | None] = mapped_column(JSONB, nullable=True, server_default="{}")
+    tone: Mapped[dict | None] = mapped_column(JSONB, nullable=True, server_default="{}")
+    aliases: Mapped[list | None] = mapped_column(JSONB, nullable=True, server_default="[]")
 
     __table_args__ = (
         UniqueConstraint("chat_id", "user_id", name="uq_relationship_chat_user"),
@@ -392,3 +395,16 @@ class ChatActivityPattern(Base):
     __table_args__ = (
         UniqueConstraint("chat_id", "hour_of_day", "day_of_week", name="uq_activity_chat_hour_day"),
     )
+
+
+class PendingObservation(Base):
+    __tablename__ = "pending_observations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    bot_memory_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    sent_message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

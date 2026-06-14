@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import random
 import re
 from collections.abc import Iterable, Sequence
 
 from conversation_engine.ai_client import ResponseDecision
 from conversation_engine.config import EngineConfig
+from conversation_engine.handles import HandleMap
 
 
 # ---------------------------------------------------------------------------
@@ -156,6 +158,181 @@ def enforce_emoji_budget(
     if recent_emoji_used:
         return strip_emojis(text)
     return text
+
+
+# ---------------------------------------------------------------------------
+# Donor-voice shaping (Phase 2 helpers — pure; NOT yet wired into validate())
+# ---------------------------------------------------------------------------
+#
+# These reproduce the donor regular's surface statistics (Com_Chat 8035098195):
+# bimodal casing (lowercase_rate 0.964), rare terminal punctuation
+# (terminal_punct_rate ~0.0585), near-zero emoji, and very short messages.
+# Phase 3 integrates them into the send path; for now they are standalone so
+# callers can opt in. validate()'s existing behavior is untouched.
+
+# Preserve URLs and @handles from being lowercased — these are the only
+# tokens where casing is semantically load-bearing (handles are case-insensitive
+# on Telegram but we keep the donor's literal form rather than mangle them).
+_PRESERVE_CASE_RE = re.compile(r"(https?://\S+|@\w+)", flags=re.IGNORECASE)
+
+
+def apply_donor_casing(text: str, rng: random.Random, lowercase_rate: float = 0.964) -> str:
+    """Reproduce the donor's bimodal casing with a per-MESSAGE coin flip.
+
+    With probability ``lowercase_rate`` the whole message is lowercased; otherwise
+    it is left exactly as-is. This matches the donor's measured ``lowercase_rate``
+    (0.964) — they almost always type lowercase but occasionally don't — instead of
+    the blunt "always lowercase" transform, which is itself a tell.
+
+    URLs and @handles keep their original casing (they are spliced back in after
+    lowercasing the rest).
+    """
+    if not text:
+        return text
+    if rng.random() >= lowercase_rate:
+        return text
+    # Lowercase everything except URLs/@handles, which we restore verbatim.
+    parts = _PRESERVE_CASE_RE.split(text)
+    out: list[str] = []
+    for index, part in enumerate(parts):
+        # re.split with one capture group yields: [text, match, text, match, ...]
+        # so odd indices are the preserved tokens.
+        out.append(part if index % 2 == 1 else part.lower())
+    return "".join(out)
+
+
+def strip_terminal_period(text: str) -> str:
+    """Strip a single trailing '.' (deterministically — the CALLER decides when).
+
+    Keeps '?' and '!' (the donor still asks/exclaims) and keeps an ellipsis
+    '...' intact (a trailing-period strip there would mangle the trailing-off
+    tone the donor uses). This shapes toward the donor's low
+    ``terminal_punct_rate`` (~0.0585); applying it probabilistically is left to
+    the caller so this helper stays deterministic and easy to test.
+    """
+    if not text:
+        return text
+    stripped = text.rstrip()
+    if stripped.endswith("...") or not stripped.endswith("."):
+        return text
+    # Single trailing period only (not part of an ellipsis, guarded above).
+    trailing_ws = text[len(stripped):]
+    return stripped[:-1] + trailing_ws
+
+
+# Donor terminal-punctuation habit: terminal_punct_rate ~0.0585, question_rate
+# ~0.0471 — i.e. the donor almost never ends a message with punctuation and rarely
+# exclaims. The model over-punctuates, pushing the terminal_punct KS just out of
+# band. This brings the realized rate onto the donor's: '.' always stripped, '!'
+# almost always, '?' often (questions are content, so it's kept more than '!').
+_STRIP_EXCLAIM_P = 0.85
+_STRIP_QUESTION_P = 0.5
+
+
+def apply_donor_terminal_punct(text: str, rng: random.Random) -> str:
+    """Probabilistically strip a single trailing ! or ? (after the deterministic
+    '.' strip) to match the donor's low terminal-punctuation rate. Keeps ellipsis."""
+    text = strip_terminal_period(text)
+    if not text:
+        return text
+    stripped = text.rstrip()
+    if stripped.endswith("...") or not stripped:
+        return text
+    last = stripped[-1]
+    if last == "!" and rng.random() < _STRIP_EXCLAIM_P:
+        return stripped[:-1].rstrip() + text[len(stripped):]
+    if last == "?" and rng.random() < _STRIP_QUESTION_P:
+        return stripped[:-1].rstrip() + text[len(stripped):]
+    return text
+
+
+# Assistant-register "AI tells" — phrasing that immediately reads as a chatbot
+# rather than a degen-group regular. violates_ai_tell() flags the first match so
+# callers can reject/regenerate. Patterns are lowercased-substring or regex.
+_AI_TELL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("certainly", re.compile(r"\bcertainly\b")),
+    ("i'd be happy to", re.compile(r"\bi('?d| would) be happy to\b")),
+    ("happy to help", re.compile(r"\bhappy to help\b")),
+    ("as an ai", re.compile(r"\bas an ai\b")),
+    ("as a language model", re.compile(r"\bas an? (?:large )?language model\b")),
+    ("great question", re.compile(r"\bgreat question\b")),
+    ("delve", re.compile(r"\bdelve\b")),
+    ("it's worth noting", re.compile(r"\bit'?s worth noting\b")),
+    ("in conclusion", re.compile(r"\bin conclusion\b")),
+    ("to summarize", re.compile(r"\bto summari[sz]e\b")),
+    ("i hope this helps", re.compile(r"\bi hope (?:this|that) helps\b")),
+    ("let me know if", re.compile(r"\blet me know if\b")),
+    ("feel free to", re.compile(r"\bfeel free to\b")),
+    ("rest assured", re.compile(r"\brest assured\b")),
+    ("it is important to note", re.compile(r"\bit is important to note\b")),
+    ("i cannot", re.compile(r"\bi (?:cannot|can'?t) (?:assist|help) with\b")),
+    ("tapestry", re.compile(r"\btapestry\b")),
+    ("navigating", re.compile(r"\bnavigating the\b")),
+    # Em-dash-heavy constructions (multiple em-dashes) read as polished AI prose.
+    ("em-dash-heavy", re.compile(r"—.*—")),
+)
+
+# Convenience: the documented banlist of tell labels, in pattern order.
+AI_TELL_BANLIST: tuple[str, ...] = tuple(label for label, _ in _AI_TELL_PATTERNS)
+
+
+def violates_ai_tell(text: str) -> str | None:
+    """Return the label of the first AI-register tell found in ``text``, else None."""
+    low = (text or "").lower()
+    for label, pattern in _AI_TELL_PATTERNS:
+        if pattern.search(low):
+            return label
+    return None
+
+
+def inject_mention(
+    text: str,
+    target_sender_id: int,
+    handle_map: HandleMap,
+    rng: random.Random,
+    *,
+    p: float = 0.0,
+) -> str:
+    """With probability ``p``, prepend ``'@handle '`` for the target sender.
+
+    The donor occasionally @-mentions the person they're replying to; injecting a
+    mention some fraction of the time (the caller sets ``p`` toward the observed
+    @-mention rate) makes replies feel addressed rather than broadcast. Default
+    ``p=0`` keeps this OFF unless a caller opts in.
+
+    No-op when: the roll fails, no handle exists for the target, the text is
+    empty, or the handle is already mentioned in the text.
+    """
+    if not text or rng.random() >= p:
+        return text
+    handle = handle_map.handle_for(target_sender_id)
+    if not handle:
+        return text
+    if re.search(rf"(?<!\w){re.escape(handle)}\b", text, flags=re.IGNORECASE):
+        return text
+    return f"{handle} {text}"
+
+
+def enforce_ack_dedup(
+    text: str,
+    todays_bot_texts: list[str],
+    *,
+    max_per_day: int = 2,
+) -> bool:
+    """True if this trivial "ack" was already sent ``>= max_per_day`` times TODAY.
+
+    Short acknowledgements ('lol', 'same', 'fr', 'gm', ...) are fine occasionally
+    but become a tell when repeated all day. The caller passes *today's* bot texts
+    (from BotMemory) so the count is a persisted per-day counter — a more precise
+    replacement for the blunt 6-message dedup window for these trivial messages.
+    Returns False (i.e. allowed) for non-ack / longer messages so this only gates
+    the trivial case.
+    """
+    norm = _normalize_for_dedup(text)
+    if not norm:
+        return False
+    matches = sum(1 for prev in todays_bot_texts if _normalize_for_dedup(prev) == norm)
+    return matches >= max_per_day
 
 
 # ---------------------------------------------------------------------------

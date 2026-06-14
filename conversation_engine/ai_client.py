@@ -43,6 +43,7 @@ class ResponseDecision(BaseModel):
     stances: dict[str, Any] = Field(default_factory=dict)
     feedback_informed: bool = False
     updated_engagement_posture: str | None = None  # Optional note from the character about shift in its own energy/mode (for persistent rhythm)
+    intent_tag: str | None = None  # Speech-act control signal (one of VALID_INTENT_TAGS) or None when absent/unknown
 
 
 class ContextSummary(BaseModel):
@@ -132,6 +133,44 @@ class GrokAiClient:
             cache_key="decision",
             temperature=0.8,
         )
+
+    async def call_raw(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.8,
+        max_tokens: int | None = None,
+        model: str | None = None,
+    ) -> AiCallResult:
+        """Low-friction raw chat-completion call with a caller-supplied messages list.
+
+        Used by the word-generator, which builds its own donor-shaped system +
+        few-shot + user messages rather than the perception/decision prompt shape.
+        Honors the same cloud_brain_enabled chokepoint as _call.
+        """
+        if not getattr(self.config, "cloud_brain_enabled", True):
+            return AiCallResult(text="", latency_ms=0, tokens_used=0)
+
+        started = time.perf_counter()
+        response = await self._client.post(
+            "/chat/completions",
+            headers={"x-grok-conv-id": f"{self.config.ai.prompt_version}:word"},
+            json={
+                "model": model or self.config.ai.decision_model,
+                "messages": messages,
+                "max_tokens": max_tokens or self.config.ai.max_output_tokens,
+                "temperature": temperature,
+            },
+        )
+        response.raise_for_status()
+        payload = response.json()
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        choices = payload.get("choices") or []
+        message = choices[0].get("message", {}) if choices else {}
+        content = message.get("content") or ""
+        usage = payload.get("usage") or {}
+        tokens = int(usage.get("prompt_tokens") or 0) + int(usage.get("completion_tokens") or 0)
+        return AiCallResult(text=content, latency_ms=latency_ms, tokens_used=tokens)
 
     async def _call(self, model: str, prompt: str, system: str | None, cache_key: str, temperature: float = 0.2) -> AiCallResult:
         # Master switch: when the cloud "brain" is disabled, every OpenRouter call
@@ -339,6 +378,27 @@ def _sanitize_response_text(value: object) -> str | None:
     return cleaned or None
 
 
+VALID_INTENT_TAGS = {
+    "agree",
+    "roast",
+    "tease",
+    "ask",
+    "deflect",
+    "react_only",
+    "freeform",
+    "non_sequitur",
+    "media",
+}
+
+
+def _coerce_intent_tag(value: object) -> str | None:
+    """Map a raw model value to a known intent tag, else None."""
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    return normalized if normalized in VALID_INTENT_TAGS else None
+
+
 def parse_response_decision(text: str) -> ResponseDecision:
     payload = json.loads(extract_json_object(text))
     confidence = payload.get("confidence")
@@ -361,6 +421,7 @@ def parse_response_decision(text: str) -> ResponseDecision:
         payload["stances"] = {}
     if not isinstance(payload.get("updated_engagement_posture"), str | type(None)):
         payload["updated_engagement_posture"] = None
+    payload["intent_tag"] = _coerce_intent_tag(payload.get("intent_tag"))
     # Old outputs may still contain a "signals" object from the prior quantitative model.
     # The qualitative three-question model no longer emits it; pop defensively.
     payload.pop("signals", None)

@@ -130,6 +130,26 @@ class EngineConfig:
     # decides WHEN to respond and the voice model writes WHAT. Turn off to stop OpenRouter
     # usage entirely (e.g. during rate-limit / billing issues) and run fully local.
     cloud_brain_enabled: bool = True
+    # Behavioral layer (Phase 2): the humanizer/governor/suspicion/output-planner/validator
+    # seam wired into the send path. Master switch is DEFAULT OFF — when False the send
+    # path is byte-for-byte the original single-send finalize. Phase 3 builds on this seam.
+    behavioral_layer_enabled: bool = False
+    behavioral_allow_media: bool = False  # opt-in sticker/media sends (live media is unverified)
+    behavioral_burst_rate: float = 0.20   # self-burst split probability (output_planner)
+    behavioral_mention_rate: float = 0.0  # @-mention injection probability (validators.inject_mention)
+    behavioral_donor_lowercase_rate: float = 0.964  # donor casing coin-flip (validators.apply_donor_casing)
+    behavioral_rng_seed: int | None = None  # fixed seed for determinism; None = per-process random
+    # Phase 5: persist the 45-min delayed feedback observation to a DB-backed due-at table
+    # (pending_observations) instead of an in-memory asyncio.Queue, so a process restart no
+    # longer loses every pending observation. DEFAULT OFF — when False the in-memory queue
+    # path is byte-for-byte unchanged. When True, schedule_observation writes a row and a
+    # poller (run_due_observation_loop) claims overdue rows and scores them.
+    feedback_due_at_enabled: bool = False
+    # Observe-only mode: the conversation engine stays fully passive — no perception,
+    # no decision, no sends. Ingestion + pipeline are separate services and keep
+    # capturing and saving every message to the DB regardless. Turn on to "watch and
+    # record" a group without the bot ever speaking.
+    observe_only: bool = False
 
 
 def _section(data: dict[str, Any], name: str) -> dict[str, Any]:
@@ -170,6 +190,16 @@ def load_engine_config(path: str | Path = "config.toml") -> EngineConfig:
         timing_classifier_model_path=os.getenv("TIMING_CLASSIFIER_MODEL_PATH", "models/timing_classifier.json"),
         timing_classifier_threshold=float(os.getenv("TIMING_CLASSIFIER_THRESHOLD", "0.0")),
         cloud_brain_enabled=os.getenv("CLOUD_BRAIN_ENABLED", "true").lower() == "true",
+        behavioral_layer_enabled=os.getenv("BEHAVIORAL_LAYER_ENABLED", "false").lower() == "true",
+        behavioral_allow_media=os.getenv("BEHAVIORAL_ALLOW_MEDIA", "false").lower() == "true",
+        behavioral_burst_rate=float(os.getenv("BEHAVIORAL_BURST_RATE", "0.20")),
+        behavioral_mention_rate=float(os.getenv("BEHAVIORAL_MENTION_RATE", "0.0")),
+        behavioral_donor_lowercase_rate=float(os.getenv("BEHAVIORAL_DONOR_LOWERCASE_RATE", "0.964")),
+        behavioral_rng_seed=(
+            int(os.environ["BEHAVIORAL_RNG_SEED"]) if os.getenv("BEHAVIORAL_RNG_SEED") else None
+        ),
+        feedback_due_at_enabled=os.getenv("FEEDBACK_DUE_AT_ENABLED", "false").lower() == "true",
+        observe_only=os.getenv("OBSERVE_ONLY", "false").lower() == "true",
         persona=PersonaConfig(**_section(raw, "persona")),
         ai=AiConfig(**_section(raw, "ai")),
         prompt=PromptConfig(**_section(raw, "prompt")),
