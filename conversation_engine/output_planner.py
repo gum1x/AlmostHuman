@@ -19,6 +19,7 @@ injected ``random.Random`` and all send delays come from an injected humanizer,
 so the same seed always yields the same plan. Nothing sleeps; delays are returned
 as values for the caller to await *outside* the send transaction.
 """
+
 from __future__ import annotations
 
 import re
@@ -43,8 +44,7 @@ class Humanizer(Protocol):
 
     def compute_send_delay(  # pragma: no cover - protocol
         self, text: str, rng, *, intent_tag: str | None = None
-    ) -> float:
-        ...
+    ) -> float: ...
 
 
 @dataclass

@@ -40,7 +40,9 @@ class TelegramSender:
         me = await self.client.get_me()
         return int(me.id)
 
-    async def send_message(self, chat_id: int, text: str, reply_to_message_id: int | None = None) -> int:
+    async def send_message(
+        self, chat_id: int, text: str, reply_to_message_id: int | None = None
+    ) -> int:
         while True:
             try:
                 sent = await self.client.send_message(chat_id, text, reply_to=reply_to_message_id)
@@ -68,7 +70,12 @@ class TelegramSender:
                 await log.awarning("conversation_sender_flood_wait", seconds=exc.seconds)
                 await asyncio.sleep(exc.seconds)
             except Exception as exc:  # noqa: BLE001 - reactions are best-effort
-                await log.awarning("conversation_sender_reaction_failed", chat_id=chat_id, message_id=message_id, error=str(exc))
+                await log.awarning(
+                    "conversation_sender_reaction_failed",
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    error=str(exc),
+                )
                 return False
 
     async def send_typing(self, chat_id: int) -> None:
@@ -111,7 +118,9 @@ class TelegramSender:
                 await log.awarning("conversation_sender_flood_wait", seconds=exc.seconds)
                 await asyncio.sleep(exc.seconds)
             except Exception as exc:  # noqa: BLE001 - media resend is best-effort
-                await log.awarning("conversation_sender_sticker_failed", chat_id=chat_id, error=str(exc))
+                await log.awarning(
+                    "conversation_sender_sticker_failed", chat_id=chat_id, error=str(exc)
+                )
                 return None
 
     async def close(self) -> None:
