@@ -8,7 +8,6 @@ from conversation_engine.ai_client import ResponseDecision
 from conversation_engine.config import EngineConfig
 from conversation_engine.handles import HandleMap
 
-
 # ---------------------------------------------------------------------------
 # Redundancy detection
 # ---------------------------------------------------------------------------
