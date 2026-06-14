@@ -14,6 +14,11 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2g
 
   redis:
     image: redis:7-alpine
@@ -26,6 +31,11 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512m
 
   migrate:
     build: .
@@ -73,6 +83,9 @@ services:
     restart: unless-stopped
     deploy:
       replicas: 2
+      resources:
+        limits:
+          memory: 768m
 
   api:
     build: .
@@ -124,12 +137,18 @@ services:
       # Cloud "brain" master switch (OpenRouter perception+decision+reflection). false =
       # fully local: timing classifier decides when, voice model writes what.
       CLOUD_BRAIN_ENABLED: ${CLOUD_BRAIN_ENABLED:-true}
+      # Observe-only: engine stays passive (no perception/decision/sends). Ingestion +
+      # pipeline keep saving every message. Set true to watch & record without speaking.
+      OBSERVE_ONLY: ${OBSERVE_ONLY:-false}
       # Timing classifier pre-gate (decides WHEN to respond).
       TIMING_CLASSIFIER_ENABLED: ${TIMING_CLASSIFIER_ENABLED:-false}
       TIMING_CLASSIFIER_MODEL_PATH: ${TIMING_CLASSIFIER_MODEL_PATH:-models/timing_classifier.json}
       TIMING_CLASSIFIER_THRESHOLD: ${TIMING_CLASSIFIER_THRESHOLD:-0.0}
       WORKER_POOL_SIZE: ${WORKER_POOL_SIZE:-5}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Dead-man alert: set to a healthchecks.io-style ping URL; the engine GETs it
+      # every ~60s while cycles run, and the service alerts when pings stop.
+      DEADMAN_PING_URL: ${DEADMAN_PING_URL:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -146,6 +165,33 @@ services:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
+    restart: unless-stopped
+    # SIGTERM now interrupts the cycle sleep (see scheduler._sleep_interruptible), but
+    # give Telethon/DB teardown headroom so stops don't escalate to SIGKILL (137).
+    stop_grace_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 3g
+    healthcheck:
+      # Heartbeat file is touched after every completed cycle (max interval 300s);
+      # stale >15min = engine hung even though the process is alive.
+      test: ["CMD-SHELL", "test -f /tmp/engine_heartbeat && test $$(( $$(date +%s) - $$(stat -c %Y /tmp/engine_heartbeat) )) -lt 900"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 300s
+    labels:
+      autoheal: "true"
+
+  # Restarts any container labeled autoheal=true when its healthcheck goes unhealthy
+  # (docker itself never restarts unhealthy containers).
+  autoheal:
+    image: willfarrell/autoheal
+    environment:
+      AUTOHEAL_CONTAINER_LABEL: autoheal
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
 
 volumes:
