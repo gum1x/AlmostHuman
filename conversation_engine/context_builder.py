@@ -101,10 +101,10 @@ def format_vector_memories(memories: list[RetrievedMemory]) -> str:
     if not memories:
         return ""
     return "\n".join(
-        (
-            f"{memory.memory_type}: {_clip(memory.content, 180)}"
+        (f"{memory.memory_type}: {_clip(memory.content, 180)}")
+        for memory in sorted(
+            memories, key=lambda item: item.similarity * item.importance_score, reverse=True
         )
-        for memory in sorted(memories, key=lambda item: (item.similarity * item.importance_score), reverse=True)
     )
 
 
@@ -142,7 +142,9 @@ def _format_context_message(message: EnrichedMessage, max_chars: int = 260) -> s
     )
 
 
-def build_thread_context(enriched_messages: list[EnrichedMessage], target: EnrichedMessage | None) -> str:
+def build_thread_context(
+    enriched_messages: list[EnrichedMessage], target: EnrichedMessage | None
+) -> str:
     if not target:
         return "No target message selected."
     thread_messages: list[EnrichedMessage] = []
@@ -153,9 +155,7 @@ def build_thread_context(enriched_messages: list[EnrichedMessage], target: Enric
             if message.message_id == target.reply_to_message_id
         )
     thread_messages.extend(
-        message
-        for message in enriched_messages
-        if message.reply_to_message_id == target.message_id
+        message for message in enriched_messages if message.reply_to_message_id == target.message_id
     )
     seen: set[int] = {target.message_id}
     unique_thread = []
@@ -166,10 +166,7 @@ def build_thread_context(enriched_messages: list[EnrichedMessage], target: Enric
         unique_thread.append(message)
     if not unique_thread:
         return ""
-    return "\n".join(
-        _format_context_message(message)
-        for message in unique_thread[-3:]
-    )
+    return "\n".join(_format_context_message(message) for message in unique_thread[-3:])
 
 
 def build_target_message_block(
@@ -185,11 +182,17 @@ def build_target_message_block(
     return f"target: {_message_label(target)}\nreply_context:\n{thread}"
 
 
-def _format_local_window(enriched_messages: list[EnrichedMessage], target: EnrichedMessage | None, radius: int = 2) -> str:
+def _format_local_window(
+    enriched_messages: list[EnrichedMessage], target: EnrichedMessage | None, radius: int = 2
+) -> str:
     if not target:
         return ""
     target_index = next(
-        (index for index, message in enumerate(enriched_messages) if message.message_id == target.message_id),
+        (
+            index
+            for index, message in enumerate(enriched_messages)
+            if message.message_id == target.message_id
+        ),
         len(enriched_messages) - 1,
     )
     start = max(0, target_index - radius)
@@ -200,7 +203,8 @@ def _format_local_window(enriched_messages: list[EnrichedMessage], target: Enric
     return "\n".join(
         _format_context_message(message, 180)
         for message in enriched_messages[start:end]
-        if message.message_id not in thread_ids and message.reply_to_message_id != target.message_id
+        if message.message_id not in thread_ids
+        and message.reply_to_message_id != target.message_id
         and not _is_noisy_nearby(message.text)
     )
 
@@ -212,7 +216,7 @@ def _extract_preferred_tone(notes: str | None) -> str | None:
     for line in notes.splitlines():
         stripped = line.strip()
         if stripped.lower().startswith("preferred tone:"):
-            return stripped[len("preferred tone:"):].strip()
+            return stripped[len("preferred tone:") :].strip()
     return None
 
 
@@ -223,11 +227,7 @@ def _format_relationship_profiles(profiles: list[UserRelationshipProfile]) -> st
     for profile in profiles[:4]:
         if not profile.notes:
             continue
-        lines.append(
-            (
-                f"user_{profile.user_id}: {_clip(profile.notes, 120)}"
-            )
-        )
+        lines.append((f"user_{profile.user_id}: {_clip(profile.notes, 120)}"))
     return "\n".join(lines)
 
 
@@ -277,7 +277,9 @@ def compute_quantitative_signals(
 
     return {
         "is_reply_to_bot": is_reply_to_bot,
-        "time_since_last_bot_msg_min": round(time_since_last_bot_msg_min, 1) if time_since_last_bot_msg_min is not None else -1,
+        "time_since_last_bot_msg_min": round(time_since_last_bot_msg_min, 1)
+        if time_since_last_bot_msg_min is not None
+        else -1,
         "responses_last_hour": responses_last_hour,
         "direct_mention": direct_mention,
     }
@@ -291,16 +293,16 @@ def format_quantitative_signals(signals: dict[str, str | float | int | bool]) ->
     return " | ".join(lines)
 
 
-def format_enriched_for_context(enriched_messages: list[EnrichedMessage], max_chars: int = 180) -> str:
+def format_enriched_for_context(
+    enriched_messages: list[EnrichedMessage], max_chars: int = 180
+) -> str:
     """Public helper to format a list of messages for the high/recent context
     summarizer prompt (and similar). Uses the same clipping/label style as
     the internal target/nearby formatters so the summarizer sees consistent ids.
     """
     if not enriched_messages:
         return ""
-    return "\n".join(
-        _format_context_message(m, max_chars) for m in enriched_messages
-    )
+    return "\n".join(_format_context_message(m, max_chars) for m in enriched_messages)
 
 
 async def build_context(

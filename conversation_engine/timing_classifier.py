@@ -16,6 +16,7 @@ Above chosen_threshold => worth a (potential) response; the smart model still de
 the actual WHETHER/WHAT. This only cheaply filters the firehose down to the ~6% of
 messages that realistically earn a reply, before any paid LLM call.
 """
+
 from __future__ import annotations
 
 import json

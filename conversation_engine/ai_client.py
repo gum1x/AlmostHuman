@@ -42,8 +42,12 @@ class ResponseDecision(BaseModel):
     tone_calibration: str | None = None
     stances: dict[str, Any] = Field(default_factory=dict)
     feedback_informed: bool = False
-    updated_engagement_posture: str | None = None  # Optional note from the character about shift in its own energy/mode (for persistent rhythm)
-    intent_tag: str | None = None  # Speech-act control signal (one of VALID_INTENT_TAGS) or None when absent/unknown
+    updated_engagement_posture: str | None = (
+        None  # Optional note from the character about shift in its own energy/mode (for persistent rhythm)
+    )
+    intent_tag: str | None = (
+        None  # Speech-act control signal (one of VALID_INTENT_TAGS) or None when absent/unknown
+    )
 
 
 class ContextSummary(BaseModel):
@@ -172,7 +176,9 @@ class GrokAiClient:
         tokens = int(usage.get("prompt_tokens") or 0) + int(usage.get("completion_tokens") or 0)
         return AiCallResult(text=content, latency_ms=latency_ms, tokens_used=tokens)
 
-    async def _call(self, model: str, prompt: str, system: str | None, cache_key: str, temperature: float = 0.2) -> AiCallResult:
+    async def _call(
+        self, model: str, prompt: str, system: str | None, cache_key: str, temperature: float = 0.2
+    ) -> AiCallResult:
         # Master switch: when the cloud "brain" is disabled, every OpenRouter call
         # (perception, decision, reflection, feedback scoring) short-circuits here and
         # makes no HTTP request at all. This is the single chokepoint, so no call site
@@ -246,7 +252,11 @@ class FakeAiClient:
                 latency_ms=0,
                 tokens_used=0,
             )
-        if "Summarize only context needed" in prompt or "HIGH-LEVEL CONTEXT" in prompt or "compressed_relevant_context" in prompt:
+        if (
+            "Summarize only context needed" in prompt
+            or "HIGH-LEVEL CONTEXT" in prompt
+            or "compressed_relevant_context" in prompt
+        ):
             # Return a payload that exercises the new high/recent compressor fields.
             # In real runs with a long chat the perception model will actually decide
             # relevance and may quote exact prior details + set direct_mention_or_continuation.
@@ -255,9 +265,24 @@ class FakeAiClient:
                     {
                         "relevant_context": True,
                         "summary": "recent context only (fake)",
-                        "compressed_relevant_context": ("target + recent; HIGH-LEVEL RELEVANT: " + ("foo deal 1.2m (pulled from high)" if "foo deal" in prompt.lower() else "none")) if "HIGH-LEVEL CONTEXT" in prompt else "target + recent window (fake)",
-                        "high_level_included": "foo deal" in prompt.lower() if "HIGH-LEVEL CONTEXT" in prompt else False,
-                        "direct_mention_or_continuation": ("@" in prompt or "direct" in prompt.lower() or "reply_to" in prompt.lower()),
+                        "compressed_relevant_context": (
+                            "target + recent; HIGH-LEVEL RELEVANT: "
+                            + (
+                                "foo deal 1.2m (pulled from high)"
+                                if "foo deal" in prompt.lower()
+                                else "none"
+                            )
+                        )
+                        if "HIGH-LEVEL CONTEXT" in prompt
+                        else "target + recent window (fake)",
+                        "high_level_included": "foo deal" in prompt.lower()
+                        if "HIGH-LEVEL CONTEXT" in prompt
+                        else False,
+                        "direct_mention_or_continuation": (
+                            "@" in prompt
+                            or "direct" in prompt.lower()
+                            or "reply_to" in prompt.lower()
+                        ),
                         "target_message_id": None,
                         "context_message_ids": [],
                         "reasoning": "fake client - recent self-contained (or direct=false)",
@@ -267,7 +292,9 @@ class FakeAiClient:
                 tokens_used=0,
             )
         return AiCallResult(
-            text=json.dumps({"should_respond": False, "confidence": 0.0, "reasoning": "fake client"}),
+            text=json.dumps(
+                {"should_respond": False, "confidence": 0.0, "reasoning": "fake client"}
+            ),
             latency_ms=0,
             tokens_used=0,
         )
@@ -448,9 +475,13 @@ def parse_context_summary(text: str) -> ContextSummary:
         payload["context_message_ids"] = []
     # New compressor fields (high/recent relevance for 3Q reasoning AI)
     if not isinstance(payload.get("compressed_relevant_context"), str):
-        payload["compressed_relevant_context"] = str(payload.get("compressed_relevant_context") or "")
+        payload["compressed_relevant_context"] = str(
+            payload.get("compressed_relevant_context") or ""
+        )
     payload["high_level_included"] = _coerce_bool(payload.get("high_level_included"))
-    payload["direct_mention_or_continuation"] = _coerce_bool(payload.get("direct_mention_or_continuation"))
+    payload["direct_mention_or_continuation"] = _coerce_bool(
+        payload.get("direct_mention_or_continuation")
+    )
     # Compat: if the new compressed field is missing but legacy summary exists, use it
     if not payload.get("compressed_relevant_context") and payload.get("summary"):
         payload["compressed_relevant_context"] = payload["summary"]

@@ -41,17 +41,17 @@ _GROUP_SENTIMENT_OVERRIDES: dict[str, float] = {
     # Positive/hype
     "vouch": 0.45,
     "vouched": 0.45,
-    "w": 0.3,           # single W as win signal (context-dependent but net positive)
+    "w": 0.3,  # single W as win signal (context-dependent but net positive)
     "based": 0.4,
     "goat": 0.5,
     "legit": 0.4,
-    "sold": 0.2,        # completed sale = mildly positive
+    "sold": 0.2,  # completed sale = mildly positive
     # Neutral reactions that look negative to VADER
     "nah": 0.0,
     "nope": 0.0,
     "bet": 0.1,
     "fr": 0.0,
-    "lowl": 0.0,        # typo of "lol"
+    "lowl": 0.0,  # typo of "lol"
 }
 
 

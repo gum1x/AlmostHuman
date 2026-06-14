@@ -104,7 +104,9 @@ async def write_interaction_memory(
     )
 
 
-async def write_stance_memory(memory: ConversationMemoryManager, chat_id: int, user_id: int | None, topic: str, stance: str) -> None:
+async def write_stance_memory(
+    memory: ConversationMemoryManager, chat_id: int, user_id: int | None, topic: str, stance: str
+) -> None:
     content = f"Expressed {stance} about {topic} to user_{user_id}"
     await memory.write_vector_memory(
         chat_id=chat_id,
@@ -116,7 +118,9 @@ async def write_stance_memory(memory: ConversationMemoryManager, chat_id: int, u
     )
 
 
-async def write_relationship_memory(memory: ConversationMemoryManager, chat_id: int, user_id: int, notes: str) -> None:
+async def write_relationship_memory(
+    memory: ConversationMemoryManager, chat_id: int, user_id: int, notes: str
+) -> None:
     content = f"Relationship with user_{user_id}: {notes}"
     await memory.write_vector_memory(
         chat_id=chat_id,
@@ -204,7 +208,9 @@ async def run_self_reflection(
     )
 
     for update in parsed.relationship_updates:
-        await memory.upsert_user_relationship(chat_id, update.user_id, update.notes, embed_text(update.notes))
+        await memory.upsert_user_relationship(
+            chat_id, update.user_id, update.notes, embed_text(update.notes)
+        )
         await write_relationship_memory(memory, chat_id, update.user_id, update.notes)
 
     await memory.write_vector_memory(
@@ -227,7 +233,11 @@ async def get_relevant_persona_vectors(
     # Persona-conditioned query: blend persona description with context so
     # retrieved memories are both topically relevant AND stylistically consistent
     # with the character (PersonaRAG technique).
-    query_text = f"{persona_description} {current_context_text}".strip() if persona_description else current_context_text
+    query_text = (
+        f"{persona_description} {current_context_text}".strip()
+        if persona_description
+        else current_context_text
+    )
     memories = await memory.get_relevant_vector_memories(
         chat_id=chat_id,
         query_embedding=embed_text(query_text),
