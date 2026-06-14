@@ -61,11 +61,17 @@ class QueueConsumer:
 
     async def _process_pending(self):
         while not self._shutdown.is_set():
-            entries = await self._redis.xreadgroup(
-                self._group, self._consumer_name,
-                {self._stream_key: "0"},
-                count=self._batch_size,
-            )
+            try:
+                entries = await self._redis.xreadgroup(
+                    self._group, self._consumer_name,
+                    {self._stream_key: "0"},
+                    count=self._batch_size,
+                )
+            except (redis.ConnectionError, redis.TimeoutError):
+                await log.aerror("redis_connection_lost")
+                if not self._shutdown.is_set():
+                    await asyncio.sleep(2)
+                continue
 
             has_entries = False
             for stream, messages in entries:
@@ -91,7 +97,7 @@ class QueueConsumer:
                     if messages:
                         await self._process_batch(messages)
 
-            except redis.ConnectionError:
+            except (redis.ConnectionError, redis.TimeoutError):
                 await log.aerror("redis_connection_lost")
                 if not self._shutdown.is_set():
                     await asyncio.sleep(2)
