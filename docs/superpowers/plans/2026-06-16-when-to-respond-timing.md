@@ -47,11 +47,12 @@ sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 import timing_rate_report as rr  # noqa: E402
+from conversation_engine.timing_classifier import TimingClassifier  # noqa: E402
 
 
-def _model():
-    # 1-feature toy model on is_question: weight pushes questions above 0.5.
-    return {
+def _clf(tmp_path):
+    """Real TimingClassifier loaded from a temp 1-feature model (weight on is_question)."""
+    model = {
         "feature_order": ["is_mention", "is_reply", "reply_to_regular", "msg_len_words",
                           "msg_len_bucket", "has_number", "has_claim_token", "is_question",
                           "sender_is_regular", "idx_gap_since_sender", "is_botlike"],
@@ -60,19 +61,22 @@ def _model():
         "feature_mean": [0]*11, "feature_std": [1]*11,
         "chosen_threshold": 0.5,
     }
+    p = tmp_path / "m.json"
+    p.write_text(json.dumps(model))
+    return TimingClassifier(model_path=p)
 
 
-def test_botlike_scores_zero():
+def test_botlike_scores_zero(tmp_path):
     rows = [{"text": "/start", "is_reply": False, "reply_to_regular": False,
              "sender_is_regular": True, "idx_gap_since_sender": -1}]
-    scores = rr.score_rows(_model(), rows)
-    assert scores == [0.0]  # botlike "/..." forced to 0
+    scores = rr.score_rows(_clf(tmp_path), rows)
+    assert scores == [0.0]  # botlike "/..." forced to 0 by the real classifier
 
 
-def test_question_scores_high():
+def test_question_scores_high(tmp_path):
     rows = [{"text": "anyone selling?", "is_reply": False, "reply_to_regular": False,
              "sender_is_regular": True, "idx_gap_since_sender": -1}]
-    scores = rr.score_rows(_model(), rows)
+    scores = rr.score_rows(_clf(tmp_path), rows)
     assert scores[0] > 0.9
 
 
@@ -102,7 +106,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import sys
 from pathlib import Path
 
@@ -110,7 +113,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from conversation_engine.timing_classifier import (  # noqa: E402
-    CLAIM, MENTION, NUMBER, WH, _is_botlike, _len_bucket, compute_regulars,
+    TimingClassifier, compute_regulars,
 )
 
 DEFAULT_SOURCE = "data/prod_export/messages.jsonl"
@@ -118,40 +121,21 @@ DEFAULT_MODEL = "models/timing_classifier_v2.json"
 THRESHOLDS = [0.5, 0.6, 0.7, 0.745, 0.8, 0.825, 0.85, 0.9]
 
 
-def _features(text, is_reply, reply_to_regular, sender_is_regular, idx_gap):
-    wc = len(text.split())
-    return {
-        "is_mention": int(bool(MENTION.search(text))),
-        "is_reply": int(is_reply),
-        "reply_to_regular": int(reply_to_regular),
-        "msg_len_words": wc,
-        "msg_len_bucket": _len_bucket(wc),
-        "has_number": int(bool(NUMBER.search(text))),
-        "has_claim_token": int(bool(CLAIM.search(text))),
-        "is_question": int(bool(text.rstrip().endswith("?") or WH.search(text))),
-        "sender_is_regular": int(sender_is_regular),
-        "idx_gap_since_sender": idx_gap,
-        "is_botlike": int(_is_botlike(text)),
-    }
-
-
-def _score(model, feats):
-    if feats["is_botlike"]:
-        return 0.0
-    z = float(model["bias"])
-    for i, name in enumerate(model["feature_order"]):
-        std = model["feature_std"][i] or 1.0
-        z += ((feats[name] - model["feature_mean"][i]) / std) * model["weights"][i]
-    return 1.0 / (1.0 + math.exp(-z))
-
-
-def score_rows(model, rows):
-    """rows: dicts with text/is_reply/reply_to_regular/sender_is_regular/idx_gap_since_sender."""
+def score_rows(clf, rows):
+    """Score each row's probability via the REAL serve-time classifier (train==serve —
+    no re-derived feature/scoring math). rows: dicts with text/is_reply/reply_to_regular/
+    sender_is_regular/idx_gap_since_sender. Botlike messages come back 0.0 (the classifier
+    force-skips them)."""
     out = []
     for r in rows:
-        feats = _features(r["text"], r["is_reply"], r["reply_to_regular"],
-                          r["sender_is_regular"], r["idx_gap_since_sender"])
-        out.append(_score(model, feats))
+        ts = clf.score(
+            text=r["text"],
+            is_reply=r["is_reply"],
+            reply_to_regular=r["reply_to_regular"],
+            sender_is_regular=r["sender_is_regular"],
+            idx_gap_since_sender=r["idx_gap_since_sender"],
+        )
+        out.append(ts.score)
     return out
 
 
@@ -200,13 +184,12 @@ def main(argv=None):
     ap.add_argument("--source", default=DEFAULT_SOURCE)
     ap.add_argument("--model", default=DEFAULT_MODEL)
     args = ap.parse_args(argv)
-    model = json.loads(Path(args.model).read_text())
-    frozen = {int(u) for u in model["regulars"]} if model.get("regulars") else None
-    rows = _load_rows(args.source, frozen)
-    scores = score_rows(model, rows)
+    clf = TimingClassifier(model_path=Path(args.model))
+    rows = _load_rows(args.source, clf.regulars)
+    scores = score_rows(clf, rows)
     nonzero = [s for s in scores if s > 0.0]
     print(f"messages scored: {len(rows):,}  (non-botlike: {len(nonzero):,})")
-    print(f"model chosen_threshold: {model.get('chosen_threshold')}")
+    print(f"model chosen_threshold: {clf.threshold}")
     print(f"\n{'threshold':>10} {'unprompted pass rate':>22}")
     for t, rate in rate_table(scores, THRESHOLDS):
         print(f"{t:>10.3f} {rate:>21.2%}")
@@ -294,9 +277,40 @@ In `load_engine_config(...)`, after the `timing_classifier_threshold=...` line (
 Run: `PYTHONPATH=. pytest tests/unit/test_timing_shadow.py -v`
 Expected: PASS (2 passed).
 
-- [ ] **Step 5: Wire shadow into the scheduler**
+- [ ] **Step 5: Extract the skip decision into a pure, testable helper (TDD)**
 
-In `scheduler.py:159`, change the instantiation guard so the classifier loads in shadow too:
+The skip-vs-proceed rule is the real logic worth testing. Extract it so it can be tested without a DB/scheduler. Add to `conversation_engine/timing_classifier.py` (module level, after `TimingScore`):
+
+```python
+def timing_should_skip(*, passes: bool, enforcing: bool) -> bool:
+    """True only when the classifier rejected the message AND we are enforcing.
+    In shadow mode (enforcing=False) we never skip — we only observe."""
+    return (not passes) and enforcing
+```
+
+Write the failing test:
+
+```python
+# append to tests/unit/test_timing_shadow.py
+from conversation_engine.timing_classifier import timing_should_skip
+
+
+def test_enforcing_skips_on_reject():
+    assert timing_should_skip(passes=False, enforcing=True) is True
+
+def test_shadow_never_skips():
+    assert timing_should_skip(passes=False, enforcing=False) is False
+
+def test_pass_never_skips():
+    assert timing_should_skip(passes=True, enforcing=True) is False
+    assert timing_should_skip(passes=True, enforcing=False) is False
+```
+
+Run: `PYTHONPATH=. pytest tests/unit/test_timing_shadow.py -v` → FAIL (`ImportError: cannot import name 'timing_should_skip'`), then add the helper, re-run → PASS.
+
+- [ ] **Step 6: Wire shadow + the helper into the scheduler**
+
+In `scheduler.py:159`, load the classifier in shadow too:
 
 ```python
         if getattr(config, "timing_classifier_enabled", False) or getattr(
@@ -304,7 +318,17 @@ In `scheduler.py:159`, change the instantiation guard so the classifier loads in
         ):
 ```
 
-In the timing pre-gate block (`scheduler.py:476-529`), after `ts = self.timing_classifier.score(...)` (line ~498), attach telemetry to the gate factors and only skip when **enforcing** (not shadow):
+Import the helper at the top alongside the existing timing imports (`scheduler.py:48-51`):
+
+```python
+from conversation_engine.timing_classifier import (
+    TimingClassifier,
+    history_feature_inputs,
+    timing_should_skip,
+)
+```
+
+In the timing pre-gate block (`scheduler.py:476-529`), after `ts = self.timing_classifier.score(...)` (~line 498): attach telemetry to the gate factors, compute `enforcing`, and gate the existing skip block on the helper:
 
 ```python
             gate = GateResult(
@@ -317,8 +341,11 @@ In the timing pre-gate block (`scheduler.py:476-529`), after `ts = self.timing_c
                 },
                 should_proceed=gate.should_proceed,
             )
-            enforcing = self.config.timing_classifier_enabled and not self.config.timing_classifier_shadow
-            if not ts.passes and enforcing:
+            enforcing = (
+                self.config.timing_classifier_enabled
+                and not self.config.timing_classifier_shadow
+            )
+            if timing_should_skip(passes=ts.passes, enforcing=enforcing):
                 # ... existing skip block (insert_ai_decision + log + return) unchanged ...
             elif not ts.passes:
                 await log.ainfo(
@@ -330,29 +357,7 @@ In the timing pre-gate block (`scheduler.py:476-529`), after `ts = self.timing_c
                 )
 ```
 
-(The existing skip block at 499-529 moves under `if not ts.passes and enforcing:`. In shadow, no early return — the cycle proceeds and records its normal decision, now carrying the `timing_*` factors.)
-
-- [ ] **Step 6: Write the failing behavior test**
-
-```python
-# append to tests/unit/test_timing_shadow.py
-import pytest
-from conversation_engine.timing_classifier import TimingClassifier, TimingScore
-
-
-def test_shadow_does_not_skip_but_enforce_does():
-    """A failing score skips only when enforcing; shadow proceeds."""
-    tc = TimingClassifier.__new__(TimingClassifier)
-    tc.ok = True; tc.threshold = 0.8; tc.regulars = None
-    # monkeypatch score to always fail
-    tc.score = lambda **k: TimingScore(score=0.1, passes=False, is_botlike=False, features={})
-    # enforce: passes=False => would early-return (skip). shadow: would not.
-    # This asserts the boolean the scheduler uses to decide skip-vs-proceed.
-    enforcing_skip = (not tc.score(text="x").passes) and True       # enabled & not shadow
-    shadow_skip = (not tc.score(text="x").passes) and False         # shadow on
-    assert enforcing_skip is True
-    assert shadow_skip is False
-```
+(The existing skip block at 499-529 moves under the `if timing_should_skip(...)`. In shadow, no early return — the cycle proceeds and records its normal decision, now carrying the `timing_*` factors.)
 
 - [ ] **Step 7: Run all timing tests**
 
@@ -362,7 +367,7 @@ Expected: PASS (all).
 - [ ] **Step 8: Commit**
 
 ```bash
-git add conversation_engine/config.py conversation_engine/scheduler.py tests/unit/test_timing_shadow.py
+git add conversation_engine/config.py conversation_engine/scheduler.py conversation_engine/timing_classifier.py tests/unit/test_timing_shadow.py
 git commit -m "feat(timing): add shadow mode — score+log would-fire without acting"
 ```
 
@@ -489,7 +494,36 @@ Expected: PASS (2 passed).
 
 - [ ] **Step 5: Add the `recent_timing_decisions` read to the memory manager**
 
-In `conversation_engine/memory_manager.py`, add a method that selects recent `AiDecision` rows and projects `gate_factors.timing_p/timing_would_pass/timing_is_direct` + `should_respond` into the dict shape `summarize` expects (return `[]` if none). Mirror an existing read method's session/query style. (Keep it read-only; no schema change — `gate_factors` is existing JSONB.)
+In `conversation_engine/memory_manager.py`, add this method (mirrors `get_avg_feedback_score`'s
+session/query style; `select`, `func`, `utcnow`, `timedelta`, and `AiDecision` are already imported
+there). Read-only; no schema change — `gate_factors` is existing JSONB:
+
+```python
+    async def recent_timing_decisions(self, hours: float = 168.0) -> list[dict]:
+        """Recent AiDecision rows carrying timing telemetry, projected into the shape
+        scripts/timing_rate_monitor.summarize() expects. Returns [] if none."""
+        since = utcnow() - timedelta(hours=hours)
+        result = await self.session.execute(
+            select(AiDecision.gate_factors, AiDecision.should_respond).where(
+                AiDecision.evaluated_at >= since,
+                AiDecision.gate_factors.has_key("timing_p"),  # JSONB ? operator (Postgres)
+            )
+        )
+        rows = []
+        for gate_factors, should_respond in result.all():
+            gf = gate_factors or {}
+            rows.append({
+                "timing_p": gf.get("timing_p"),
+                "timing_would_pass": gf.get("timing_would_pass"),
+                "timing_is_direct": gf.get("timing_is_direct"),
+                "should_respond": should_respond,
+            })
+        return rows
+```
+
+This DB read needs Postgres, so it isn't unit-tested here; its output shape is the same dict the
+`summarize()` tests already pin, and it's exercised live in Task 4 Step 4 (the monitor run). If
+`utcnow`/`timedelta` are not already imported in this file, add them (check the existing imports).
 
 - [ ] **Step 6: Commit**
 
@@ -531,7 +565,11 @@ No code. Deploy + verify, gated and reversible. Owner runs VPS commands (stage-o
 - §8 safety/rollback → Task 4 Step 6 rollback drill; guardrails untouched. ✓
 - §9 phasing → Tasks ordered shadow→enforce. ✓
 
-**2. Placeholder scan:** Task 3 Step 5 (memory_manager read) describes the method without full code because it must mirror an existing query whose exact session idiom isn't quoted here — the implementer should copy the nearest existing read method. All other steps have complete code. Acceptable, flagged.
+**2. Placeholder scan:** Clean after the pre-flight fixes (2026-06-16). Task 1 now reuses the real
+`TimingClassifier` (no re-derived scoring math — satisfies the train==serve constraint); Task 2's
+skip logic is an extracted `timing_should_skip` helper with real unit tests (no self-referential
+test); Task 3 Step 5 has complete code. The only un-unit-tested code is the Task 3 DB read (needs
+Postgres), verified live in Task 4.
 
 **3. Type consistency:** `score_rows`/`rate_table` (Task 1), `summarize`/`check_band` (Task 3) signatures match their tests. The `gate_factors` keys written in Task 2 (`timing_p`, `timing_would_pass`, `timing_is_direct`) are exactly the keys `summarize` reads in Task 3. ✓
 
