@@ -2,10 +2,15 @@
 """Report rolling timing rates from recorded decisions; exit nonzero if the
 unprompted pass rate leaves the alarm band. Pure aggregation core + a thin DB read."""
 from __future__ import annotations
-import argparse, sys
+
+import argparse
 
 
 def summarize(rows):
+    # NOTE: from live data (recent_timing_decisions, filtered on has_key("timing_p")),
+    # addressed_frac reads ~0 — addressed messages bypass the classifier so they never get
+    # timing_p written. unprompted_pass_rate is the real calibration knob; addressed
+    # engagement is enforced structurally (the scheduler bypass), not measured here.
     n = len(rows)
     if n == 0:
         return {"n": 0, "unprompted_pass_rate": 0.0, "addressed_frac": 0.0, "send_rate": 0.0}
