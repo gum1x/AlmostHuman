@@ -1037,10 +1037,12 @@ class ConversationMemoryManager:
         rows = []
         for gate_factors, should_respond in result.all():
             gf = gate_factors or {}
-            rows.append({
-                "timing_p": gf.get("timing_p"),
-                "timing_would_pass": gf.get("timing_would_pass"),
-                "timing_is_direct": gf.get("timing_is_direct"),
-                "should_respond": should_respond,
-            })
+            rows.append(
+                {
+                    "timing_p": gf.get("timing_p"),
+                    "timing_would_pass": gf.get("timing_would_pass"),
+                    "timing_is_direct": gf.get("timing_is_direct"),
+                    "should_respond": should_respond,
+                }
+            )
         return rows
