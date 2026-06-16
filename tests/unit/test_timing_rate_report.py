@@ -1,5 +1,7 @@
 from __future__ import annotations
-import json, sys
+
+import json
+import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -7,6 +9,7 @@ sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 import timing_rate_report as rr  # noqa: E402
+
 from conversation_engine.timing_classifier import TimingClassifier  # noqa: E402
 
 
@@ -18,7 +21,8 @@ def _toy_classifier(tmp_path):
         "weights": [0,0,0,0,0,0,0,5.0,0,0,0], "bias": -2.5,
         "feature_mean": [0]*11, "feature_std": [1]*11, "chosen_threshold": 0.5,
     }
-    p = tmp_path / "toy.json"; p.write_text(json.dumps(model))
+    p = tmp_path / "toy.json"
+    p.write_text(json.dumps(model))
     return TimingClassifier(model_path=p)
 
 
