@@ -289,6 +289,7 @@ def test_text_features_match_training_regexes():
 
 
 def make_config(**gate_overrides) -> EngineConfig:
+    timing_classifier_enabled = gate_overrides.pop("timing_classifier_enabled", False)
     return EngineConfig(
         active_chat_ids=[],
         xai_api_key="",
@@ -302,6 +303,7 @@ def make_config(**gate_overrides) -> EngineConfig:
         persona_engine=PersonaEngineConfig(),
         feedback_loop=FeedbackLoopConfig(),
         engagement_gate=EngagementGateConfig(**gate_overrides),
+        timing_classifier_enabled=timing_classifier_enabled,
     )
 
 
@@ -385,7 +387,8 @@ class RecordingClassifier:
 
 
 async def test_prepare_cycle_feeds_train_parity_features_to_classifier():
-    scheduler = make_scheduler()
+    # timing_classifier_enabled=True so the enforcing skip path is active.
+    scheduler = make_scheduler(make_config(timing_classifier_enabled=True))
     classifier = RecordingClassifier()
     scheduler.timing_classifier = classifier
     memory = FakeMemory(messages=FIXTURE)  # no bot memory: bot silent "for days"

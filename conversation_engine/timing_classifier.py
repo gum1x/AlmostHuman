@@ -142,6 +142,12 @@ class TimingScore:
     features: dict
 
 
+def timing_should_skip(*, passes: bool, enforcing: bool) -> bool:
+    """True only when the classifier rejected the message AND we are enforcing.
+    In shadow mode (enforcing=False) we never skip — we only observe."""
+    return (not passes) and enforcing
+
+
 class TimingClassifier:
     """Self-contained scorer. Loads once; score() is pure-python and cheap."""
 
