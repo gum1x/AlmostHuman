@@ -44,16 +44,17 @@ A member's "response rate" has two very different meanings. Measured on the live
 "Responds ~60% of the time" is the **addressed** rate, not the overall rate. Setting the *overall*
 rate to 35% would mean replying to 1 in 3 of *all* messages — ~17× a real human — instant spam.
 
-**Target:**
-- **Addressed** (bot is @mentioned, or someone replies to a bot message): respond **~35%**
-  (human ≈ 60%; deliberately more reserved). High responsiveness here is good — ignoring people who
-  talk to you is itself a bot tell.
-- **Overall / unprompted:** low (a few %), a natural byproduct. Monitored as a ceiling so it never
-  drifts into spam.
+**Target (decision A, 2026-06-16):**
+- **Addressed** (bot is @mentioned, someone replies to a bot message, or an active bot thread):
+  **always engage** — let the LLM + validators decide quality. Ignoring people who talk to you is
+  itself a bot tell, so near-always answering is the human move. *This is already the code's
+  behavior* — addressed messages bypass the timing classifier (`scheduler.py:476-480`); no change.
+- **Unprompted firehose** (messages not aimed at the bot): the classifier's selective filter. This
+  is where being choosy reads as natural. Calibrate the threshold here (chattier-leaning, per owner)
+  and monitor the resulting overall rate as a spam ceiling.
 
-The classifier already has `is_mention` and `is_reply` features, so addressed messages score high.
-We tune the threshold so ~35% of addressed messages clear it, and watch that the overall rate stays
-sane.
+So the classifier governs *only the unprompted stream*. The "~35%/60%" discussion settled the
+addressed policy (always engage); the tunable number is the unprompted pass rate.
 
 ## 5. Architecture — replace, don't stack
 
@@ -91,9 +92,10 @@ candidates and (b) live traffic drifts from training. So:
    on live traffic for several days.
 2. **Measure** the realized would-fire rate, split by addressed vs unprompted, and the post-LLM
    would-actually-send rate.
-3. **Calibrate** the threshold to hit ~35% addressed end-to-end (adjust the raw threshold from its
-   0.825 default — direction set by what the shadow data shows; the model's isotonic calibration map
-   turns the target rate into a threshold lookup, then verify on the shadow data).
+3. **Calibrate** the threshold to the chosen *unprompted-firehose* pass rate (adjust the raw
+   threshold from its 0.825 default — chattier-leaning per owner; the model's isotonic calibration
+   map turns a target rate into a threshold lookup, then verify on the shadow/replay data). Addressed
+   messages always engage regardless of threshold.
 4. **Enforce** — flip to live at that threshold. Keep measuring; alarm if the 7-day addressed rate
    drifts outside a band (e.g. [25%, 50%]) or the overall rate exceeds a ceiling.
 
@@ -125,14 +127,21 @@ exactly what the bot *would* do before it does anything.
 
 ## 10. Success criteria
 
-- Addressed-response rate holds ~35% (±, within the alarm band) over a rolling 7-day window.
+- Addressed messages near-always engage (bypass preserved); unprompted-firehose pass rate holds at
+  the calibrated target (within the alarm band) over a rolling 7-day window.
 - Overall rate stays under the spam ceiling.
-- Fired-on messages look like reasonable places for a regular to speak (human eyeball).
+- Fired-on unprompted messages look like reasonable places for a regular to speak (human eyeball).
 - One-flag rollback verified.
 
 ## 11. Open items
 
-- Confirm timing template: `8384923892` (default) vs the chattier `5755932997`.
-- Exact alarm bands for the rate monitor.
+- Exact unprompted-firehose target rate + alarm bands (set during calibration from replay/shadow data).
 - Whether to keep the LLM backstop long-term (arch A) or move to fully-local timing+voice (arch B)
   once the classifier is trusted.
+
+**Resolved during planning (2026-06-16):**
+- Addressed-message policy → **always engage** (decision A); selectivity applies to the unprompted
+  stream only.
+- The classifier + serve-time scorer are **already built and wired** (`timing_classifier.py`,
+  `scheduler.py:476-529`), flag-off on the v1 model path. The remaining work is shadow measurement,
+  threshold calibration, and flipping it on against the v2 model — not building from scratch.
