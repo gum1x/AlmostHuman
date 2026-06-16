@@ -510,8 +510,7 @@ class ConversationScheduler:
                 should_proceed=gate.should_proceed,
             )
             enforcing = (
-                self.config.timing_classifier_enabled
-                and not self.config.timing_classifier_shadow
+                self.config.timing_classifier_enabled and not self.config.timing_classifier_shadow
             )
             if timing_should_skip(passes=ts.passes, enforcing=enforcing):
                 await memory.insert_ai_decision(
@@ -547,7 +546,8 @@ class ConversationScheduler:
             elif not ts.passes:
                 await log.ainfo(
                     "timing_classifier_shadow",
-                    chat_id=chat_id, p=round(ts.score, 3),
+                    chat_id=chat_id,
+                    p=round(ts.score, 3),
                     threshold=self.timing_classifier.threshold,
                     would_pass=ts.passes,
                     message_id=getattr(target_for_direct, "message_id", None),
