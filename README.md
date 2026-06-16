@@ -38,7 +38,7 @@ Telegram  ->  Telethon ingest  ->  Redis Stream  ->  Pipeline workers  ->  Postg
 
 | Tier | Cost | What it does |
 |------|------|--------------|
-| Control plane | Pure Python, no tokens | Engagement gate, posture/mood, fatigue, relationship and thread tracking. Decides *whether* to act. |
+| Control plane | Pure Python, no tokens | A trained timing classifier (logreg) + the engagement gate, plus posture/mood, fatigue, relationship and thread tracking. Decides *whether* to act — messages addressed to the bot always engage, the rest of the firehose is filtered to a calibrated rate. |
 | LLM reasoning | One model call per survivor | Perception compresses the room, then the character decides *what* to say at temp 0.8. |
 | Local voice | Local GPU/CPU, no tokens | Optional LoRA fine-tune rewrites the plan into authentic, in-room phrasing. |
 
@@ -73,7 +73,7 @@ Every poll runs a gauntlet (`conversation_engine/scheduler.py:_run_cycle`). Most
 2. **Threshold** skips unless there are 3+ new group messages (1 in DMs) or an active thread it is already in.
 3. **Enrichment** runs VADER sentiment (with per-group overrides) and topic extraction.
 4. **Brief** reads the room: tension, active threads, topic drift.
-5. **Engagement gate** is the bouncer: a cheap weighted score over velocity, fatigue, relationship, repeat, and past feedback vs `min_gate_score_to_send`.
+5. **When-to-respond filter** is two cheap layers before any token is spent. A trained logistic-regression **timing classifier** (`timing_classifier.py`, learned from which messages real regulars actually reply to) scores the incoming message — messages that @mention or reply to the bot always pass, the rest of the firehose must clear a calibrated threshold (the dial that sets how chatty it is). Survivors then hit the **engagement gate**: a weighted score over velocity, fatigue, relationship, repeat, and past feedback vs `min_gate_score_to_send`.
 6. **Context build** assembles the target plus nearby messages, persona, recent self-activity, posture, and signals.
 7. **Perception** compresses ~200 high-level messages down to what matters for this one decision.
 8. **Decision** has the character answer three honest questions and emit JSON (`should_respond`, plan, posture, stances).
@@ -102,6 +102,7 @@ pipeline/queue_consumer.py        Redis Stream -> idempotent Postgres upserts (w
 storage/                          async SQLAlchemy models + pgvector 384-dim MiniLM (postgres_models, repositories, database)
 conversation_engine/scheduler.py  the decision cycle (_run_cycle), per-cycle orchestration
 conversation_engine/engagement_gate.py   cheap pre-LLM filter: the bouncer
+conversation_engine/timing_classifier.py  learned logreg: would a regular bother replying here?
 conversation_engine/context_builder.py   assembles target + nearby + persona + posture + signals
 conversation_engine/ai_client.py  perception + decision LLM calls (OpenAI-compatible)
 conversation_engine/prompts.py    SMART_PARTICIPANT_SYSTEM: the character, three questions, JSON out
@@ -146,7 +147,6 @@ Conventions: Python 3.11+, async throughout, SQLAlchemy async, pydantic schemas 
 
 ## Further reading
 
-- [`docs/ARCHITECTURE_AND_IMPLEMENTATION.md`](docs/ARCHITECTURE_AND_IMPLEMENTATION.md) full design deep-dive
 - [`docs/telegram_group_speech_style_guide.md`](docs/telegram_group_speech_style_guide.md) the voice the model is trained toward
 - `CLAUDE.md` repo map and conventions
 
