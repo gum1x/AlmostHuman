@@ -1,6 +1,6 @@
 # GroupGhost
 
-Self-hosted autonomous group-chat participant. It ingests a live Telegram group over MTProto, decides *whether* to speak with a model that learned when real members bother to reply, before spending a single token, reasons about *what* to say with an LLM, rewrites the result in a fine-tuned local voice, sends it back, and grades how each message landed 45 minutes later so the next decision gets smarter. It tracks mood, memory, and relationships across cycles, so it reads as a real low-ego member of the room instead of a bot that replies to everything.
+Self-hosted autonomous group-chat participant. It ingests a live Telegram group over MTProto, decides *whether* to speak with a machine-learning classifier trained on which messages real members actually reply to, before spending a single token, reasons about *what* to say with an LLM, rewrites the result in a fine-tuned local voice, sends it back, and grades how each message landed 45 minutes later so the next decision gets smarter. It tracks mood, memory, and relationships across cycles, so it reads as a real low-ego member of the room instead of a bot that replies to everything.
 
 No reply-to-everything loop. No obvious AI voice. No third-party chat API in the hot path. Your machine, your models, the group's own message stream.
 
