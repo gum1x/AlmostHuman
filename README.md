@@ -12,7 +12,7 @@ Most chat bots answer every message and sound like an assistant, which is exactl
 
 - **~162k messages** of real group history (≈3 weeks) train and calibrate the when-to-respond model.
 - **11-feature logistic-regression** classifier, fit on a **time-ordered 60/20/20 split** (no future leakage) with **isotonic-calibrated** probabilities.
-- **One tunable threshold** sets how chatty it is — shipped at a **~6% reply cadence**, so the large majority of the unprompted firehose is dropped before a single token is spent.
+- **One tunable threshold** sets how chatty it is. At its shipped **~6% reply cadence**, the large majority of the unprompted firehose is dropped before a single token is spent.
 - Perception compresses up to **200 messages** per decision into a **6k-token** context budget.
 - Every message it sends is **scored 45 minutes later**, and that grade feeds back into the gate.
 - Local ranking is free: **384-dim** MiniLM embeddings + VADER sentiment, zero API calls.
@@ -47,7 +47,7 @@ Telegram  ->  Telethon ingest  ->  Redis Stream  ->  Pipeline workers  ->  Postg
 
 | Tier | Cost | What it does |
 |------|------|--------------|
-| Control plane | Pure Python, no tokens | A trained timing classifier (logreg) + the engagement gate, plus posture/mood, fatigue, relationship and thread tracking. Decides *whether* to act — messages addressed to the bot always engage, the rest of the firehose is filtered to a calibrated rate. |
+| Control plane | Pure Python, no tokens | A trained timing classifier (logreg) + the engagement gate, plus posture/mood, fatigue, relationship and thread tracking. Decides *whether* to act: messages addressed to the bot always engage, the rest of the firehose is filtered to a calibrated rate. |
 | LLM reasoning | One model call per survivor | Perception compresses the room, then the character decides *what* to say at temp 0.8. |
 | Local voice | Local GPU/CPU, no tokens | Optional local fine-tune rewrites the plan into authentic, in-room phrasing. |
 
@@ -82,7 +82,7 @@ Every poll runs a gauntlet (`conversation_engine/scheduler.py:_run_cycle`). Most
 2. **Threshold** skips unless there are 3+ new group messages (1 in DMs) or an active thread it is already in.
 3. **Enrichment** runs VADER sentiment (with per-group overrides) and topic extraction.
 4. **Brief** reads the room: tension, active threads, topic drift.
-5. **When-to-respond filter** is two cheap layers before any token is spent. A trained logistic-regression **timing classifier** (`timing_classifier.py`, learned from which messages real regulars actually reply to) scores the incoming message — messages that @mention or reply to the bot always pass, the rest of the firehose must clear a calibrated threshold (the dial that sets how chatty it is). Survivors then hit the **engagement gate**: a weighted score over velocity, fatigue, relationship, repeat, and past feedback vs `min_gate_score_to_send`.
+5. **When-to-respond filter** is two cheap layers before any token is spent. A trained logistic-regression **timing classifier** (`timing_classifier.py`, learned from which messages real regulars actually reply to) scores the incoming message: messages that @mention or reply to the bot always pass, the rest of the firehose must clear a calibrated threshold (the dial that sets how chatty it is). Survivors then hit the **engagement gate**: a weighted score over velocity, fatigue, relationship, repeat, and past feedback vs `min_gate_score_to_send`.
 6. **Context build** assembles the target plus nearby messages, persona, recent self-activity, posture, and signals.
 7. **Perception** compresses ~200 high-level messages down to what matters for this one decision.
 8. **Decision** has the character answer three honest questions and emit JSON (`should_respond`, plan, posture, stances).
@@ -93,7 +93,7 @@ The **feedback loop** is what turns a responder into something that adapts. A li
 
 ## Voice model
 
-A large model is smart but writes like a large model. So the labor is split: the big model decides *what* to say, and a small local fine-tune re-says it in the target voice (`LOCAL_STYLE_REWRITE_ENABLED`, served over HTTP — see `conversation_engine/style_rewriter.py`). The rewrite runs on your own hardware, so authentic phrasing costs no tokens and never leaves your machine. Turn the flag off and the engine sends the LLM's plan verbatim.
+A large model is smart but writes like a large model. So the labor is split: the big model decides *what* to say, and a small local fine-tune re-says it in the target voice (`LOCAL_STYLE_REWRITE_ENABLED`, served over HTTP; see `conversation_engine/style_rewriter.py`). The rewrite runs on your own hardware, so authentic phrasing costs no tokens and never leaves your machine. Turn the flag off and the engine sends the LLM's plan verbatim.
 
 The voice model is trained and validated offline against real message history before it ships; only the inference-time rewrite lives in this repo.
 
