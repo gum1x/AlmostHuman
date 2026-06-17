@@ -49,6 +49,7 @@ from conversation_engine.timing_classifier import (
     TimingClassifier,
     compute_regulars,
     history_feature_inputs,
+    timing_should_skip,
 )
 from conversation_engine.validators import (
     apply_donor_casing,
@@ -156,7 +157,9 @@ class ConversationScheduler:
         self.bot_username = bot_username.lower() if bot_username else None
         self.style_rewriter = LocalStyleRewriter(config)
         self.timing_classifier = None
-        if getattr(config, "timing_classifier_enabled", False):
+        if getattr(config, "timing_classifier_enabled", False) or getattr(
+            config, "timing_classifier_shadow", False
+        ):
             tc = TimingClassifier(model_path=config.timing_classifier_model_path)
             # Optional threshold override from config (0 = keep the model's own).
             if config.timing_classifier_threshold and config.timing_classifier_threshold > 0:
@@ -496,7 +499,20 @@ class ConversationScheduler:
                 sender_is_regular=hist_feats["sender_is_regular"],
                 idx_gap_since_sender=hist_feats["idx_gap_since_sender"],
             )
-            if not ts.passes:
+            gate = GateResult(
+                gate_score=gate.gate_score,
+                gate_factors={
+                    **gate.gate_factors,
+                    "timing_p": round(ts.score, 3),
+                    "timing_would_pass": ts.passes,
+                    "timing_is_direct": False,
+                },
+                should_proceed=gate.should_proceed,
+            )
+            enforcing = (
+                self.config.timing_classifier_enabled and not self.config.timing_classifier_shadow
+            )
+            if timing_should_skip(passes=ts.passes, enforcing=enforcing):
                 await memory.insert_ai_decision(
                     chat_id=chat_id,
                     prompt_version=self.config.ai.prompt_version,
@@ -512,7 +528,7 @@ class ConversationScheduler:
                         f"(botlike={ts.is_botlike})"
                     ),
                     gate_score=gate.gate_score,
-                    gate_factors={**gate.gate_factors, "timing_p": round(ts.score, 3)},
+                    gate_factors=gate.gate_factors,
                     request1_latency_ms=0,
                     request1_tokens_used=0,
                     request2_tokens_used=0,
@@ -527,6 +543,15 @@ class ConversationScheduler:
                 )
                 await memory.record_cycle_success(chat_id)
                 return self._backoff_interval(previous_interval)
+            elif not ts.passes:
+                await log.ainfo(
+                    "timing_classifier_shadow",
+                    chat_id=chat_id,
+                    p=round(ts.score, 3),
+                    threshold=self.timing_classifier.threshold,
+                    would_pass=ts.passes,
+                    message_id=getattr(target_for_direct, "message_id", None),
+                )
 
         if not is_private_dm and not gate.should_proceed:
             override_suppressed = (
