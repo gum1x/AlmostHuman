@@ -6,7 +6,7 @@ No reply-to-everything loop. No obvious AI voice. No third-party chat API in the
 
 ## Why
 
-Most chat bots answer every message and sound like an assistant, which is exactly how a room clocks them as fake. GroupGhost splits the problem the way a person actually works: a cheap control plane decides if anything is even worth saying, and only then does an expensive model decide what. A delayed feedback loop scores every message it sends on what really happened (replies, reactions, sentiment shift) and feeds that back into the gate, so the agent adapts to *this* room rather than a global heuristic. A local LoRA voice model rewrites the plan into authentic phrasing, and a classifier two-sample test proves that output is hard to tell apart from the real thing. All of it runs on infrastructure you host, pointed at any model you choose.
+Most chat bots answer every message and sound like an assistant, which is exactly how a room clocks them as fake. GroupGhost splits the problem the way a person actually works: a cheap control plane decides if anything is even worth saying, and only then does an expensive model decide what. A delayed feedback loop scores every message it sends on what really happened (replies, reactions, sentiment shift) and feeds that back into the gate, so the agent adapts to *this* room rather than a global heuristic. A local fine-tuned voice model rewrites the plan into authentic phrasing. All of it runs on infrastructure you host, pointed at any model you choose.
 
 ## 60-second quickstart
 
@@ -40,7 +40,7 @@ Telegram  ->  Telethon ingest  ->  Redis Stream  ->  Pipeline workers  ->  Postg
 |------|------|--------------|
 | Control plane | Pure Python, no tokens | A trained timing classifier (logreg) + the engagement gate, plus posture/mood, fatigue, relationship and thread tracking. Decides *whether* to act — messages addressed to the bot always engage, the rest of the firehose is filtered to a calibrated rate. |
 | LLM reasoning | One model call per survivor | Perception compresses the room, then the character decides *what* to say at temp 0.8. |
-| Local voice | Local GPU/CPU, no tokens | Optional LoRA fine-tune rewrites the plan into authentic, in-room phrasing. |
+| Local voice | Local GPU/CPU, no tokens | Optional local fine-tune rewrites the plan into authentic, in-room phrasing. |
 
 ## Commands
 
@@ -82,17 +82,11 @@ Every poll runs a gauntlet (`conversation_engine/scheduler.py:_run_cycle`). Most
 
 The **feedback loop** is what turns a responder into something that adapts. A line that flops makes the agent slightly less likely to jump in next time; a line that lands buys it confidence. Persistent state across cycles (`posture` mood, `BotMemory` self-history, an evolving `BotPersonaCore`, and `ResponseFeedback` grades) is what makes it read as one continuous someone instead of a fresh prompt each time.
 
-## Voice model and eval harness (self-hosted, $0)
+## Voice model
 
-A large model is smart but writes like a large model. So the labor is split: the big model decides what to say, and a small local LoRA fine-tune (`LOCAL_STYLE_REWRITE_ENABLED`, served over HTTP) rewrites it in the target voice. The point worth making is that the fine-tune is *measured*, not vibe-checked. The full train-and-evaluate toolchain lives in `scripts/`:
+A large model is smart but writes like a large model. So the labor is split: the big model decides *what* to say, and a small local fine-tune re-says it in the target voice (`LOCAL_STYLE_REWRITE_ENABLED`, served over HTTP — see `conversation_engine/style_rewriter.py`). The rewrite runs on your own hardware, so authentic phrasing costs no tokens and never leaves your machine. Turn the flag off and the engine sends the LLM's plan verbatim.
 
-- **Dataset** builds supervised pairs from real history: `build_voice_dataset_v2.py`, `build_donor_sft.py`, `build_group_sft.py`, `build_reply_pairs_sft.py`, `build_dossiers.py`.
-- **Fine-tune** runs QLoRA and merges the adapter: `finetune_voice.py`, `finetune_voice_gpu.py`, `finetune_donor_qlora.py`, `merge_adapter.py`.
-- **Serve** quantizes and hosts locally: `voice_generate_shim.py`, `vps_convert_and_serve.sh` (GGUF + llama.cpp).
-- **Evaluate** proves output quality: `c2st_discriminator.py` (classifier two-sample test), `coherence_eval.py`, `eval_harness.py`, `local_vs_api_ab.py`, `wordgen_ab.py`.
-- **Orchestrate** spins cloud GPU pods for training: `runpod_orchestrate.py`.
-
-The C2ST discriminator trains a classifier to tell model output apart from the target distribution. If it can't, the fine-tune is doing its job. Coherence and A/B harnesses catch the failure mode where authentic-sounding text is actually nonsense.
+The voice model is trained and validated offline against real message history before it ships; only the inference-time rewrite lives in this repo.
 
 ## How it works
 
@@ -106,7 +100,7 @@ conversation_engine/timing_classifier.py  learned logreg: would a regular bother
 conversation_engine/context_builder.py   assembles target + nearby + persona + posture + signals
 conversation_engine/ai_client.py  perception + decision LLM calls (OpenAI-compatible)
 conversation_engine/prompts.py    SMART_PARTICIPANT_SYSTEM: the character, three questions, JSON out
-conversation_engine/style_rewriter.py     local LoRA voice rewrite over HTTP
+conversation_engine/style_rewriter.py     local fine-tuned voice rewrite over HTTP
 conversation_engine/feedback_loop.py      delayed 45-min scoring -> ResponseFeedback
 conversation_engine/persona_engine.py     self-reflection -> BotPersonaCore mutation
 conversation_engine/memory_manager.py     the shared DB bus (all access goes through here)
