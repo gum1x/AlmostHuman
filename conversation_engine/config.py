@@ -124,6 +124,7 @@ class EngineConfig:
     timing_classifier_enabled: bool = False
     timing_classifier_model_path: str = "models/timing_classifier.json"
     timing_classifier_threshold: float = 0.0  # 0 = use the model's chosen_threshold
+    timing_classifier_shadow: bool = False  # score+log "would-fire" without acting (measure first)
     # Cloud "brain" = the OpenRouter perception + decision LLM calls ("what kind of
     # situation is this? / what does someone like me do here?"). When False, the engine
     # skips BOTH paid calls and falls back to local-only mode: the timing classifier
@@ -197,6 +198,7 @@ def load_engine_config(path: str | Path = "config.toml") -> EngineConfig:
             "TIMING_CLASSIFIER_MODEL_PATH", "models/timing_classifier.json"
         ),
         timing_classifier_threshold=float(os.getenv("TIMING_CLASSIFIER_THRESHOLD", "0.0")),
+        timing_classifier_shadow=os.getenv("TIMING_CLASSIFIER_SHADOW", "false").lower() == "true",
         cloud_brain_enabled=os.getenv("CLOUD_BRAIN_ENABLED", "true").lower() == "true",
         behavioral_layer_enabled=os.getenv("BEHAVIORAL_LAYER_ENABLED", "false").lower() == "true",
         behavioral_allow_media=os.getenv("BEHAVIORAL_ALLOW_MEDIA", "false").lower() == "true",

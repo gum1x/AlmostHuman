@@ -1023,3 +1023,26 @@ class ConversationMemoryManager:
         self.session.add(row)
         await self.session.flush()
         return row
+
+    async def recent_timing_decisions(self, hours: float = 168.0) -> list[dict]:
+        """Recent AiDecision rows carrying timing telemetry, projected into the shape
+        scripts/timing_rate_monitor.summarize() expects. Returns [] if none."""
+        since = utcnow() - timedelta(hours=hours)
+        result = await self.session.execute(
+            select(AiDecision.gate_factors, AiDecision.should_respond).where(
+                AiDecision.evaluated_at >= since,
+                AiDecision.gate_factors.has_key("timing_p"),  # JSONB ? operator (Postgres)
+            )
+        )
+        rows = []
+        for gate_factors, should_respond in result.all():
+            gf = gate_factors or {}
+            rows.append(
+                {
+                    "timing_p": gf.get("timing_p"),
+                    "timing_would_pass": gf.get("timing_would_pass"),
+                    "timing_is_direct": gf.get("timing_is_direct"),
+                    "should_respond": should_respond,
+                }
+            )
+        return rows
