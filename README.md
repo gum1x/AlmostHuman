@@ -8,6 +8,15 @@ No reply-to-everything loop. No obvious AI voice. No third-party chat API in the
 
 Most chat bots answer every message and sound like an assistant, which is exactly how a room clocks them as fake. GroupGhost splits the problem the way a person actually works: a cheap control plane decides if anything is even worth saying, and only then does an expensive model decide what. A delayed feedback loop scores every message it sends on what really happened (replies, reactions, sentiment shift) and feeds that back into the gate, so the agent adapts to *this* room rather than a global heuristic. A local fine-tuned voice model rewrites the plan into authentic phrasing. All of it runs on infrastructure you host, pointed at any model you choose.
 
+## By the numbers
+
+- **~162k messages** of real group history (≈3 weeks) train and calibrate the when-to-respond model.
+- **11-feature logistic-regression** classifier, fit on a **time-ordered 60/20/20 split** (no future leakage) with **isotonic-calibrated** probabilities.
+- **One tunable threshold** sets how chatty it is — shipped at a **~6% reply cadence**, so the large majority of the unprompted firehose is dropped before a single token is spent.
+- Perception compresses up to **200 messages** per decision into a **6k-token** context budget.
+- Every message it sends is **scored 45 minutes later**, and that grade feeds back into the gate.
+- Local ranking is free: **384-dim** MiniLM embeddings + VADER sentiment, zero API calls.
+
 ## 60-second quickstart
 
 ```bash
