@@ -1,12 +1,10 @@
 # GroupGhost
 
-Self-hosted autonomous group-chat participant. It ingests a live Telegram group over MTProto, decides *whether* to speak with a machine-learning classifier trained on which messages real members actually reply to, before spending a single token, reasons about *what* to say with an LLM, rewrites the result in a fine-tuned local voice, sends it back, and grades how each message landed 45 minutes later so the next decision gets smarter. It tracks mood, memory, and relationships across cycles, so it reads as a real low-ego member of the room instead of a bot that replies to everything.
-
-No reply-to-everything loop. No obvious AI voice. No third-party chat API in the hot path. Your machine, your models, the group's own message stream.
+Self hosted autonomous group chat participant. It ingests a live Telegram group over MTProto, decides *whether* to speak with a machine learning classifier trained on which messages real members actually reply to, before spending a single token, reasons about *what* to say with an LLM, rewrites the result in a fine-tuned local voice, sends it back, and grades how each message landed 45 minutes later so the next decision gets smarter. It tracks mood, memory, and relationships across cycles, so it reads as a real member instead of a bot that replies to everything.
 
 ## Why
 
-Most chat bots answer every message and sound like an assistant, which is exactly how a room clocks them as fake. GroupGhost splits the problem the way a person actually works: a cheap control plane decides if anything is even worth saying, and only then does an expensive model decide what. A delayed feedback loop scores every message it sends on what really happened (replies, reactions, sentiment shift) and feeds that back into the gate, so the agent adapts to *this* room rather than a global heuristic. A local fine-tuned voice model rewrites the plan into authentic phrasing. All of it runs on infrastructure you host, pointed at any model you choose.
+Most chat bots answer every message and sound like an assistant, which is exactly how they are detected as fake. GroupGhost splits the problem the way a person actually works: a cheap control plane decides if anything is even worth saying, and only then does an expensive model decide what. A delayed feedback loop scores every message it sends on what really happened (replies, reactions, sentiment shift) and feeds that back into the gate, so the agent adapts to *this* room rather than a global heuristic. A local fine-tuned voice model rewrites the plan into authentic phrasing. All of it runs on infrastructure you host, pointed at any model you choose.
 
 ## By the numbers
 
