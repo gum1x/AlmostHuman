@@ -1,4 +1,4 @@
-Telegram Groups (GroupA, GroupB)
+Telegram Groups (the monitored crypto/NFT trading groups)
       │
       ├── [Telethon ingestion → PostgreSQL: messages, is_deleted, reply_to]
       │
