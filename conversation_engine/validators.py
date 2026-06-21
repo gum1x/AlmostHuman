@@ -168,7 +168,7 @@ def enforce_emoji_budget(
 # Donor-voice shaping (Phase 2 helpers — pure; NOT yet wired into validate())
 # ---------------------------------------------------------------------------
 #
-# These reproduce the donor regular's surface statistics (GroupA 0):
+# These reproduce a donor regular's surface statistics:
 # bimodal casing (lowercase_rate 0.964), rare terminal punctuation
 # (terminal_punct_rate ~0.0585), near-zero emoji, and very short messages.
 # Phase 3 integrates them into the send path; for now they are standalone so

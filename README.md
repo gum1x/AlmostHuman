@@ -4,7 +4,7 @@ Self hosted autonomous group chat participant that ingests a live Telegram group
 
 ## Why
 
-Most chat bots answer every message and sound like an assistant, which is exactly how they are detected as fake. GroupGhost splits the problem the way a person actually works: a cheap control plane decides if anything is even worth saying, and only then does an expensive model decide what. A delayed feedback loop scores every message it sends on what really happened (replies, reactions, sentiment shift) and feeds that back into the gate, so the agent adapts to *this* room rather than a global heuristic. A local fine-tuned voice model rewrites the plan into authentic phrasing. All of it runs on infrastructure you host, pointed at any model you choose.
+Most chat bots answer every message and sound like an assistant, which is exactly what stops them from feeling human. GroupGhost splits the problem the way a person actually works: a cheap control plane decides if anything is even worth saying, and only then does an expensive model decide what. A delayed feedback loop scores every message it sends on what really happened (replies, reactions, sentiment shift) and feeds that back into the gate, so the agent adapts to *this* room rather than a global heuristic. A local fine-tuned voice model rewrites the plan into authentic phrasing. All of it runs on infrastructure you host, pointed at any model you choose.
 
 ## By the numbers
 

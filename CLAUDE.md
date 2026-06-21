@@ -2,12 +2,6 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-
-
-```bash
-
-```
-
 ## What This Is
 
 Autonomous Telegram group chat participant — an AI that acts as a real, low-ego member of chaotic crypto/degen Telegram groups. Hybrid architecture: cheap structured control plane (gate, posture, signals) + rich LLM character reasoning (Grok via OpenRouter/xAI) + optional local fine-tuned voice model for authentic phrasing.

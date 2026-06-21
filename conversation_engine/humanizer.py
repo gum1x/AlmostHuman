@@ -1,7 +1,7 @@
 """Timing / circadian humanizer (pure, deterministic, no I/O).
 
 The bot's worst behavioral tells are *temporal*, not lexical. Against the
-GroupA regular band (data/prod_export/analysis/behavioral_baseline.json):
+regular-member band (measured from real chat history):
 
   * reply latency p50: bot 39s vs regular band [13.9, 30.1]s  -> bot too SLOW
   * latency p90:       bot 144.3s, regular band [51.8, 286.44]s (in band)
