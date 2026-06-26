@@ -253,20 +253,6 @@ class FailedCycle(Base):
     prompt_version: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
-class ReplyDistribution(Base):
-    __tablename__ = "reply_distribution"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    reply_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
-    last_replied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-
-    __table_args__ = (
-        UniqueConstraint("chat_id", "user_id", name="uq_reply_distribution_chat_user"),
-    )
-
-
 class StanceTracker(Base):
     __tablename__ = "stance_tracker"
 
@@ -352,6 +338,9 @@ class UserRelationshipProfile(Base):
     receptiveness_score: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     embedding: Mapped[list[float] | None] = mapped_column(Vector(384), nullable=True)
+    # Reserved (not read by the live engine): kept for a future per-person
+    # dossier/tone/aliases store. The wired relationship signal is `notes`
+    # (see context_builder.build_request2_constraints / _extract_preferred_tone).
     dossier: Mapped[dict | None] = mapped_column(JSONB, nullable=True, server_default="{}")
     tone: Mapped[dict | None] = mapped_column(JSONB, nullable=True, server_default="{}")
     aliases: Mapped[list | None] = mapped_column(JSONB, nullable=True, server_default="[]")

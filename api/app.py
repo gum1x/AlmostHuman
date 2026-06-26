@@ -7,10 +7,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.dependencies import get_message_repo, get_session
 from core.config import settings
-from core.logging import setup_logging
+from core.logging import get_logger, setup_logging
 from core.schemas import HealthResponse, MessageResponse, PaginatedResponse
 from storage.database import dispose_engine, engine
 from storage.repositories import MessageRepository
+
+log = get_logger(__name__)
 
 _redis_pool: redis.Redis | None = None
 
@@ -38,7 +40,8 @@ async def health():
     try:
         async with engine.connect() as conn:
             await conn.execute(text("SELECT 1"))
-    except Exception:
+    except Exception as exc:
+        await log.awarning("health_postgres_check_failed", error=str(exc))
         pg_status = "error"
 
     try:
@@ -48,9 +51,10 @@ async def health():
                 groups = await _redis_pool.xinfo_groups(settings.redis_stream_key)
                 if groups:
                     stream_lag = groups[0].get("lag", 0)
-            except Exception:
-                pass
-    except Exception:
+            except Exception as exc:
+                await log.awarning("health_stream_lag_check_failed", error=str(exc))
+    except Exception as exc:
+        await log.awarning("health_redis_check_failed", error=str(exc))
         redis_status = "error"
 
     status = "healthy" if pg_status == "ok" and redis_status == "ok" else "degraded"

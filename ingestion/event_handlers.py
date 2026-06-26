@@ -166,7 +166,8 @@ async def _get_sender_info(event) -> SenderInfo | None:
             is_bot=getattr(sender, "bot", False) or False,
             is_premium=getattr(sender, "premium", False) or False,
         )
-    except Exception:
+    except Exception as exc:
+        await log.awarning("sender_info_resolve_failed", error=str(exc))
         return None
 
 
@@ -181,7 +182,8 @@ def _msg_to_raw_dict(msg, chat_type: str | None = None) -> dict:
             "chat_type": chat_type,
             "is_private": chat_type == "private",
         }
-    except Exception:
+    except Exception as exc:
+        log.warning("msg_to_raw_dict_failed", message_id=getattr(msg, "id", None), error=str(exc))
         return {}
 
 

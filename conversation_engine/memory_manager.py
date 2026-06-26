@@ -59,20 +59,6 @@ def merge_relationship_notes(existing: str | None, new: str, max_length: int = 1
     return "\n".join(parts)[:max_length]
 
 
-def _serialize_dossier_field(value: Any) -> Any:
-    """Coerce a dossier field to a JSON-able dict/list for a JSONB column.
-
-    Accepts already-serialized dicts/lists (returned as-is) or dossier
-    dataclasses exposing ``to_dict()``. ``None`` means "field not provided"
-    and is passed through unchanged so callers can update fields selectively.
-    """
-    if value is None:
-        return None
-    if hasattr(value, "to_dict"):
-        return value.to_dict()
-    return value
-
-
 class ConversationMemoryManager:
     def __init__(self, session: AsyncSession):
         self.session = session
@@ -516,72 +502,6 @@ class ConversationMemoryManager:
             )
         )
         return list(result.scalars().all())
-
-    async def get_dossiers(self, chat_id: int, user_ids: list[int]) -> dict[int, dict[str, Any]]:
-        """Return {user_id: {dossier, tone, aliases}} for the given users.
-
-        Reuses the get_relationship_profiles query shape. Users with no
-        relationship row are simply absent from the returned dict.
-        """
-        profiles = await self.get_relationship_profiles(chat_id, user_ids)
-        return {
-            profile.user_id: {
-                "dossier": profile.dossier or {},
-                "tone": profile.tone or {},
-                "aliases": profile.aliases or [],
-            }
-            for profile in profiles
-        }
-
-    async def write_dossier(
-        self,
-        chat_id: int,
-        user_id: int,
-        dossier: Any | None = None,
-        tone: Any | None = None,
-        aliases: Any | None = None,
-    ) -> None:
-        """Upsert the dossier/tone/aliases JSONB onto the relationship row.
-
-        Creates the row if absent (race-safe via SAVEPOINT, like
-        upsert_user_relationship). Only the explicitly provided fields are
-        written. Accepts already-serialized dicts/lists or dossier dataclasses
-        (serialized via conversation_engine.dossier when available).
-        """
-        dossier_value = _serialize_dossier_field(dossier)
-        tone_value = _serialize_dossier_field(tone)
-        aliases_value = _serialize_dossier_field(aliases)
-
-        existing = await self._get_relationship(chat_id, user_id)
-        if existing is None:
-            row = UserRelationshipProfile(
-                chat_id=chat_id,
-                user_id=user_id,
-                last_interaction_at=utcnow(),
-            )
-            if dossier_value is not None:
-                row.dossier = dossier_value
-            if tone_value is not None:
-                row.tone = tone_value
-            if aliases_value is not None:
-                row.aliases = aliases_value
-            try:
-                # SAVEPOINT so a concurrent first-insert race only rolls back
-                # this insert, not the caller's outer transaction.
-                async with self.session.begin_nested():
-                    self.session.add(row)
-                    await self.session.flush()
-                return
-            except IntegrityError:
-                # Lost the race: the row exists now, fall through to update it.
-                existing = await self._get_relationship(chat_id, user_id)
-        if dossier_value is not None:
-            existing.dossier = dossier_value
-        if tone_value is not None:
-            existing.tone = tone_value
-        if aliases_value is not None:
-            existing.aliases = aliases_value
-        existing.last_interaction_at = utcnow()
 
     async def get_today_callback_count(self, chat_id: int, since: datetime) -> int:
         """Count BotMemory rows in this chat since `since` that recorded a callback.

@@ -6,9 +6,7 @@ import os
 import random
 import signal
 import time
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any
 
 from conversation_engine import humanizer, suspicion_monitor, volume_governor
 from conversation_engine.ai_client import (
@@ -22,7 +20,6 @@ from conversation_engine.ai_client import (
 from conversation_engine.bootstrap import run_bootstrap
 from conversation_engine.config import EngineConfig, load_engine_config
 from conversation_engine.context_builder import (
-    ContextBundle,
     build_context,
     build_request2_constraints,
     compute_quantitative_signals,
@@ -44,6 +41,12 @@ from conversation_engine.persona_engine import (
     write_stance_memory,
 )
 from conversation_engine.prompts import build_context_summary_prompt, build_response_decision_prompt
+from conversation_engine.scheduler_support import (
+    _append_context_block,
+    _CycleLlmOutcome,
+    _CyclePrep,
+    _decline_reasoning,
+)
 from conversation_engine.sender import TelegramSender
 from conversation_engine.style_rewriter import LocalStyleRewriter
 from conversation_engine.timing_classifier import (
@@ -81,67 +84,6 @@ def _touch_heartbeat() -> None:
             f.write(str(time.time()))
     except OSError:
         pass
-
-
-@dataclass(frozen=True)
-class _CyclePrep:
-    chat_id: int
-    is_private_dm: bool
-    active_bot_thread: bool
-    new_message_count: int
-    snapshot_message_id: int | None
-    gate: GateResult
-    visible_numeric_controls: dict[str, Any]
-    brief: Brief
-    enriched: list
-    context: ContextBundle
-    raw_context: str
-    high_level_enriched: list
-    recent_enriched_for_summary: list
-    recent_bot_mem: list
-    bot_sent_ids: set[int]
-    recent_bot_activity: str
-    posture: str
-    responses_last_hour: int
-    # Behavioral-layer counts (only populated when behavioral_layer_enabled; else 0).
-    group_msgs_last_hour: int = 0
-    bot_sends_last_10min: int = 0
-    # Persona + latest self-reflection carried into the decision-time constraints
-    # block (how recent replies landed + per-user tone + persona alignment).
-    current_persona: Any = None
-    latest_reflection: Any = None
-
-
-@dataclass(frozen=True)
-class _CycleLlmOutcome:
-    decision: ResponseDecision
-    request1: Any
-    request2: Any
-    posture: str
-    ok: bool
-    reason: str | None
-
-
-def _decline_reasoning(reason: str | None, decision: ResponseDecision) -> str:
-    """Reasoning text persisted when a cycle doesn't send: the validator/decline
-    reason plus the model's actual reasoning (not just the constant)."""
-    parts = [reason or "declined"]
-    if decision.reasoning:
-        parts.append(decision.reasoning)
-    if decision.annoying_reason:
-        parts.append(f"annoying_reason: {decision.annoying_reason}")
-    return " | ".join(parts)[:2000]
-
-
-def _append_context_block(context, title: str, body: str):
-    if not body.strip():
-        return context
-    return type(context)(
-        context=f"{context.context}\n\n=== {title} ===\n{body.strip()}",
-        candidate_user_ids=context.candidate_user_ids,
-        relationship_profiles=context.relationship_profiles,
-        avg_feedback_score=context.avg_feedback_score,
-    )
 
 
 class ConversationScheduler:
@@ -277,8 +219,8 @@ class ConversationScheduler:
 
             async with httpx.AsyncClient(timeout=10) as client:
                 await client.get(self._deadman_url)
-        except Exception:
-            pass
+        except Exception as exc:  # best-effort liveness ping; never block the loop
+            await log.awarning("deadman_ping_failed", error=str(exc))
 
     def _backoff_interval(self, previous_interval: int) -> int:
         return min(

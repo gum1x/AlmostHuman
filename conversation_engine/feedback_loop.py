@@ -169,7 +169,13 @@ class FeedbackLoop:
                 if emoji:
                     reactions.append(Reaction(emoji=emoji, count=rc.count))
             return reactions
-        except Exception:
+        except Exception as exc:
+            await log.awarning(
+                "feedback_fetch_reactions_failed",
+                chat_id=chat_id,
+                message_id=message_id,
+                error=str(exc),
+            )
             return []
 
     async def observe_response(
@@ -307,8 +313,12 @@ class FeedbackLoop:
                                 await ConversationMemoryManager(session).delete_pending_observation(
                                     obs["id"]
                                 )
-                    except Exception:
-                        pass
+                    except Exception as cleanup_exc:
+                        await log.awarning(
+                            "feedback_due_observation_cleanup_failed",
+                            obs_id=obs["id"],
+                            error=str(cleanup_exc),
+                        )
             if self._shutdown.is_set():
                 return
             try:
