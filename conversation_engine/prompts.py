@@ -116,9 +116,10 @@ def build_decide_and_draft_prompt(
     config: EngineConfig,
     constraints: str | None = None,
 ) -> tuple[str, str]:
+    constraints_block = f"\n{constraints.strip()}\n" if constraints and constraints.strip() else ""
     prompt = f"""
 {context.context}
-
+{constraints_block}
 New messages arrived. Decide whether to respond and what to say.
 
 === YOUR ACTIVITY SIGNALS ===

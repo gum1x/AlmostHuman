@@ -24,6 +24,7 @@ from conversation_engine.config import EngineConfig, load_engine_config
 from conversation_engine.context_builder import (
     ContextBundle,
     build_context,
+    build_request2_constraints,
     compute_quantitative_signals,
     format_quantitative_signals,
     select_target_message,
@@ -105,6 +106,10 @@ class _CyclePrep:
     # Behavioral-layer counts (only populated when behavioral_layer_enabled; else 0).
     group_msgs_last_hour: int = 0
     bot_sends_last_10min: int = 0
+    # Persona + latest self-reflection carried into the decision-time constraints
+    # block (how recent replies landed + per-user tone + persona alignment).
+    current_persona: Any = None
+    latest_reflection: Any = None
 
 
 @dataclass(frozen=True)
@@ -675,6 +680,8 @@ class ConversationScheduler:
             responses_last_hour=responses_last_hour,
             group_msgs_last_hour=group_msgs_last_hour,
             bot_sends_last_10min=bot_sends_last_10min,
+            current_persona=current_persona,
+            latest_reflection=latest_reflection,
         )
 
     async def _execute_llm(self, prep: _CyclePrep) -> _CycleLlmOutcome:
@@ -732,9 +739,15 @@ class ConversationScheduler:
             relationship_profiles=context.relationship_profiles,
             avg_feedback_score=context.avg_feedback_score,
         )
+        constraints = build_request2_constraints(
+            current_persona=prep.current_persona,
+            latest_reflection=prep.latest_reflection,
+            relationship_profiles=decision_context.relationship_profiles,
+            avg_feedback_score=decision_context.avg_feedback_score,
+        )
         decision_prompt, decision_system = build_response_decision_prompt(
             decision_context,
-            "",
+            constraints,
             self.config,
         )
         request2 = await self.ai_client.call_decision_model(decision_prompt, decision_system)

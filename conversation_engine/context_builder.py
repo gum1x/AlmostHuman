@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
 
 from conversation_engine.engagement_gate import GateResult, get_candidate_user_ids
 from conversation_engine.enrichment import Brief, EnrichedMessage
@@ -369,34 +368,56 @@ async def build_context(
 def build_request2_constraints(
     current_persona: BotPersonaCore | None,
     latest_reflection: BotSelfReflection | None,
-    meta_reflection: dict[str, Any] | None,
     relationship_profiles: list[UserRelationshipProfile],
+    avg_feedback_score: float = 0.0,
     target_message_block: str = "",
 ) -> str:
-    meta = meta_reflection or {}
-    lines = [
-        target_message_block,
-        "",
-        "=== FEEDBACK LEARNING ===",
-        f"What has worked recently: {meta.get('what_works', 'unknown')}",
-        f"What has not worked: {meta.get('what_doesnt', 'unknown')}",
-    ]
+    """Per-decision constraints fed to the decision model so feedback and
+    relationships actually influence what gets said.
+
+    Built entirely from already-persisted state: how recent replies landed
+    (24h ``avg_feedback_score`` from ResponseFeedback), what the bot has learned
+    in this chat (latest self-reflection, which is itself feedback-driven), and
+    per-user ``preferred_tone`` (written by meta-reflection into relationship
+    notes). No new storage required — it surfaces signals the engine already
+    computes but previously dropped before the prompt.
+    """
+    lines: list[str] = []
+    if target_message_block.strip():
+        lines.extend([target_message_block.strip(), ""])
+
+    if avg_feedback_score > 0.15:
+        landed = (
+            f"recent replies have landed well (avg {avg_feedback_score:+.2f} on a -1..1 scale) — "
+            "keep doing what's working"
+        )
+    elif avg_feedback_score < -0.15:
+        landed = (
+            f"recent replies have landed flat/poorly (avg {avg_feedback_score:+.2f} on a -1..1 scale) — "
+            "be sharper or stay silent more"
+        )
+    else:
+        landed = f"recent replies have been roughly neutral (avg {avg_feedback_score:+.2f} on a -1..1 scale)"
+    lines.extend(["=== FEEDBACK LEARNING ===", f"How my recent replies landed: {landed}."])
+    if latest_reflection and (latest_reflection.updated_summary or "").strip():
+        lines.append(
+            f"What I've learned in this chat: {_clip(latest_reflection.updated_summary.strip(), 240)}"
+        )
+
+    tone_lines = []
     for profile in relationship_profiles:
-        tone = _extract_preferred_tone(profile.notes) or "unknown"
-        lines.append(f"For user_{profile.user_id} specifically: preferred_tone={tone}")
+        tone = _extract_preferred_tone(profile.notes)
+        if tone:
+            tone_lines.append(f"user_{profile.user_id}: preferred_tone={tone}")
+    if tone_lines:
+        lines.extend(["", "=== RELATIONSHIP TONE ===", *tone_lines])
+
     lines.extend(
         [
             "",
-            "=== PERSONA ALIGNMENT CHECK ===",
+            "=== PERSONA ALIGNMENT ===",
             f"Core identity: {current_persona.identity_summary if current_persona else 'unknown'}",
-            f"Latest self-reflection: {latest_reflection.updated_summary if latest_reflection else 'none'}",
-            "If your drafted response contradicts your core identity, revise it.",
-            "",
-            "=== SEMANTIC JUDGMENT ===",
-            "Answer these before drafting: Is this worth replying to? What exact message are you replying to? "
-            "Why? What are the risks? What would make this annoying?",
-            "Use the exact target message and thread context above. Numeric controls are only operational hints; "
-            "the visible conversation is authoritative.",
+            "If your drafted reply contradicts your core identity or ignores the feedback above, revise it.",
         ]
     )
     return "\n".join(lines)

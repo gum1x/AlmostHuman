@@ -121,8 +121,8 @@ class EngineConfig:
     # incoming message ("would a regular bother to reply?") and skips the expensive LLM
     # perception+decision calls below threshold. Enforces the realistic ~6% response rate
     # and cuts paid API calls. See conversation_engine/timing_classifier.py.
-    timing_classifier_enabled: bool = False
-    timing_classifier_model_path: str = "models/timing_classifier.json"
+    timing_classifier_enabled: bool = True
+    timing_classifier_model_path: str = "models/timing_classifier_v2.json"
     timing_classifier_threshold: float = 0.0  # 0 = use the model's chosen_threshold
     timing_classifier_shadow: bool = False  # score+log "would-fire" without acting (measure first)
     # Cloud "brain" = the OpenRouter perception + decision LLM calls ("what kind of
@@ -193,9 +193,9 @@ def load_engine_config(path: str | Path = "config.toml") -> EngineConfig:
         local_inference_url=os.getenv("LOCAL_INFERENCE_URL", ""),
         voice_mode=os.getenv("VOICE_MODE", "standalone").lower(),
         emoji_window=int(os.getenv("EMOJI_WINDOW", "5")),
-        timing_classifier_enabled=os.getenv("TIMING_CLASSIFIER_ENABLED", "false").lower() == "true",
+        timing_classifier_enabled=os.getenv("TIMING_CLASSIFIER_ENABLED", "true").lower() == "true",
         timing_classifier_model_path=os.getenv(
-            "TIMING_CLASSIFIER_MODEL_PATH", "models/timing_classifier.json"
+            "TIMING_CLASSIFIER_MODEL_PATH", "models/timing_classifier_v2.json"
         ),
         timing_classifier_threshold=float(os.getenv("TIMING_CLASSIFIER_THRESHOLD", "0.0")),
         timing_classifier_shadow=os.getenv("TIMING_CLASSIFIER_SHADOW", "false").lower() == "true",
