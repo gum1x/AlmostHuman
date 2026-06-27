@@ -33,6 +33,19 @@ jobs:
       - run: pip install -e ".[dev]"
       - run: pytest tests/unit -q
 
+  integration:
+    # ubuntu-latest ships a working Docker daemon, so testcontainers can spin up
+    # the real pgvector Postgres + Redis these tests need.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -e ".[dev]"
+      - run: pytest tests/integration -q
+
   build:
     runs-on: ubuntu-latest
     steps:

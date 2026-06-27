@@ -39,6 +39,9 @@ dev = [
 asyncio_mode = "auto"
 testpaths = ["tests"]
 filterwarnings = ["ignore::DeprecationWarning"]
+markers = [
+    "integration: tests that require a live Postgres/Redis via testcontainers (need Docker)",
+]
 
 [tool.setuptools.packages.find]
 include = ["core*", "storage*", "pipeline*", "ingestion*", "api*", "conversation_engine*"]
