@@ -69,6 +69,7 @@ from conversation_engine.validators import (
 )
 from core.logging import get_logger, setup_logging
 from storage.database import async_session_factory, dispose_engine
+from storage.postgres_models import BotMemory
 
 log = get_logger(__name__)
 
@@ -882,63 +883,15 @@ class ConversationScheduler:
             async with async_session_factory() as session:
                 async with session.begin():
                     memory = ConversationMemoryManager(session)
-                    stored_decision = await memory.insert_ai_decision(
-                        chat_id=prep.chat_id,
-                        prompt_version=self.config.ai.prompt_version,
-                        snapshot_message_id=prep.snapshot_message_id,
-                        new_message_count=prep.new_message_count,
-                        should_respond=True,
-                        confidence=decision.confidence,
+                    bot_memory = await self._persist_send_core(
+                        memory,
+                        prep,
+                        llm_out,
                         response_text=decision.response_text,
                         reply_to_message_id=decision.reply_to_message_id,
-                        reasoning=(
-                            (decision.reasoning or "")
-                            + (
-                                f" | posture update: {decision.updated_engagement_posture}"
-                                if decision.updated_engagement_posture
-                                else ""
-                            )
-                        ),
-                        gate_score=prep.gate.gate_score,
-                        gate_factors={**prep.gate.gate_factors, **prep.visible_numeric_controls},
-                        request1_latency_ms=llm_out.request1.latency_ms,
-                        request1_tokens_used=llm_out.request1.tokens_used,
-                        request2_tokens_used=llm_out.request2.tokens_used,
-                    )
-                    await memory.update_ai_decision_sent_message(
-                        stored_decision.id, sent_message_id
-                    )
-                    bot_memory = await memory.insert_bot_memory(
-                        chat_id=prep.chat_id,
                         sent_message_id=sent_message_id,
-                        response_text=decision.response_text or "",
-                        reply_to_user_id=decision.reply_to_user_id,
-                        reply_to_message_id=decision.reply_to_message_id,
-                        reasoning=decision.reasoning,
-                        tone_calibration=decision.tone_calibration,
-                        brief_snapshot=prep.brief.as_dict(),
-                        stances=decision.stances,
-                        prompt_version=self.config.ai.prompt_version,
-                        cycle_snapshot_message_id=prep.snapshot_message_id,
-                        current_posture=persisted_posture,
+                        persisted_posture=persisted_posture,
                     )
-                    await write_interaction_memory(
-                        memory,
-                        prep.chat_id,
-                        decision.reply_to_user_id,
-                        decision.topic,
-                        decision.response_text or "",
-                    )
-                    for topic, stance in decision.stances.items():
-                        await memory.upsert_stance(
-                            prep.chat_id,
-                            topic=topic,
-                            stance=str(stance),
-                            user_id=decision.reply_to_user_id,
-                        )
-                        await write_stance_memory(
-                            memory, prep.chat_id, decision.reply_to_user_id, topic, str(stance)
-                        )
                     await memory.record_cycle_success(prep.chat_id)
             # Schedule the delayed feedback observation AFTER the recording txn commits,
             # so it is never awaited inside an open transaction.
@@ -952,6 +905,83 @@ class ConversationScheduler:
                 sent_message_id=sent_message_id,
             )
         return self.config.scheduler.initial_interval_seconds
+
+    async def _persist_send_core(
+        self,
+        memory: ConversationMemoryManager,
+        prep: _CyclePrep,
+        llm_out: _CycleLlmOutcome,
+        *,
+        response_text: str | None,
+        reply_to_message_id: int | None,
+        sent_message_id: int,
+        persisted_posture: str,
+    ) -> BotMemory:
+        """Shared 'successful send' persistence for both finalize paths.
+
+        Writes the canonical AiDecision (should_respond=True) + its sent-message
+        link, the BotMemory row, the interaction memory, and the stance rows, then
+        returns the BotMemory so the caller can schedule the delayed observation
+        against its id. The caller owns record_cycle_success and
+        schedule_observation: the flag-off path schedules the observation AFTER its
+        transaction commits (no session) while the behavioral path schedules it
+        inside the same transaction (passing the session), so those two calls stay
+        at the call site rather than in here.
+        """
+        decision = llm_out.decision
+        stored_decision = await memory.insert_ai_decision(
+            chat_id=prep.chat_id,
+            prompt_version=self.config.ai.prompt_version,
+            snapshot_message_id=prep.snapshot_message_id,
+            new_message_count=prep.new_message_count,
+            should_respond=True,
+            confidence=decision.confidence,
+            response_text=response_text,
+            reply_to_message_id=reply_to_message_id,
+            reasoning=(
+                (decision.reasoning or "")
+                + (
+                    f" | posture update: {decision.updated_engagement_posture}"
+                    if decision.updated_engagement_posture
+                    else ""
+                )
+            ),
+            gate_score=prep.gate.gate_score,
+            gate_factors={**prep.gate.gate_factors, **prep.visible_numeric_controls},
+            request1_latency_ms=llm_out.request1.latency_ms,
+            request1_tokens_used=llm_out.request1.tokens_used,
+            request2_tokens_used=llm_out.request2.tokens_used,
+        )
+        await memory.update_ai_decision_sent_message(stored_decision.id, sent_message_id)
+        bot_memory = await memory.insert_bot_memory(
+            chat_id=prep.chat_id,
+            sent_message_id=sent_message_id,
+            response_text=response_text or "",
+            reply_to_user_id=decision.reply_to_user_id,
+            reply_to_message_id=reply_to_message_id,
+            reasoning=decision.reasoning,
+            tone_calibration=decision.tone_calibration,
+            brief_snapshot=prep.brief.as_dict(),
+            stances=decision.stances,
+            prompt_version=self.config.ai.prompt_version,
+            cycle_snapshot_message_id=prep.snapshot_message_id,
+            current_posture=persisted_posture,
+        )
+        await write_interaction_memory(
+            memory,
+            prep.chat_id,
+            decision.reply_to_user_id,
+            decision.topic,
+            response_text or "",
+        )
+        for topic, stance in decision.stances.items():
+            await memory.upsert_stance(
+                prep.chat_id, topic=topic, stance=str(stance), user_id=decision.reply_to_user_id
+            )
+            await write_stance_memory(
+                memory, prep.chat_id, decision.reply_to_user_id, topic, str(stance)
+            )
+        return bot_memory
 
     # ------------------------------------------------------------------
     # Behavioral-layer finalize (flag-ON path)
@@ -1179,59 +1209,15 @@ class ConversationScheduler:
     ) -> None:
         """Record the canonical AiDecision + BotMemory + stances for the lead send,
         matching what the original _finalize_cycle persists on a successful send."""
-        decision = llm_out.decision
-        stored_decision = await memory.insert_ai_decision(
-            chat_id=prep.chat_id,
-            prompt_version=self.config.ai.prompt_version,
-            snapshot_message_id=prep.snapshot_message_id,
-            new_message_count=prep.new_message_count,
-            should_respond=True,
-            confidence=decision.confidence,
+        bot_memory = await self._persist_send_core(
+            memory,
+            prep,
+            llm_out,
             response_text=action.text,
             reply_to_message_id=action.reply_to_message_id,
-            reasoning=(
-                (decision.reasoning or "")
-                + (
-                    f" | posture update: {decision.updated_engagement_posture}"
-                    if decision.updated_engagement_posture
-                    else ""
-                )
-            ),
-            gate_score=prep.gate.gate_score,
-            gate_factors={**prep.gate.gate_factors, **prep.visible_numeric_controls},
-            request1_latency_ms=llm_out.request1.latency_ms,
-            request1_tokens_used=llm_out.request1.tokens_used,
-            request2_tokens_used=llm_out.request2.tokens_used,
-        )
-        await memory.update_ai_decision_sent_message(stored_decision.id, sent_message_id)
-        bot_memory = await memory.insert_bot_memory(
-            chat_id=prep.chat_id,
             sent_message_id=sent_message_id,
-            response_text=action.text or "",
-            reply_to_user_id=decision.reply_to_user_id,
-            reply_to_message_id=action.reply_to_message_id,
-            reasoning=decision.reasoning,
-            tone_calibration=decision.tone_calibration,
-            brief_snapshot=prep.brief.as_dict(),
-            stances=decision.stances,
-            prompt_version=self.config.ai.prompt_version,
-            cycle_snapshot_message_id=prep.snapshot_message_id,
-            current_posture=persisted_posture,
+            persisted_posture=persisted_posture,
         )
-        await write_interaction_memory(
-            memory,
-            prep.chat_id,
-            decision.reply_to_user_id,
-            decision.topic,
-            action.text or "",
-        )
-        for topic, stance in decision.stances.items():
-            await memory.upsert_stance(
-                prep.chat_id, topic=topic, stance=str(stance), user_id=decision.reply_to_user_id
-            )
-            await write_stance_memory(
-                memory, prep.chat_id, decision.reply_to_user_id, topic, str(stance)
-            )
         # Pass the caller's open session so the pending observation row commits
         # atomically with this BotMemory write (no partial-failure window).
         await self.feedback_loop.schedule_observation(
