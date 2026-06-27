@@ -16,11 +16,9 @@ from core.constants import EventType
 from core.schemas import RawTelegramEvent, SenderInfo
 from pipeline.workers import MessageWorker
 from storage.repositories import MessageRepository
-from tests.integration.conftest import skip_if_no_docker
 
-# No Docker/testcontainers -> skip the whole module cleanly (never a collect error).
-skip_if_no_docker()
-
+# Docker-gating lives in tests/integration/conftest.py's pytest_collection_modifyitems
+# hook: with no Docker daemon, every integration-marked test is skipped at collection.
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope="session")]
 
 CHAT_ID = -1001234567890

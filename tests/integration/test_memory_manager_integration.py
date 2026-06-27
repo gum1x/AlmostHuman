@@ -19,11 +19,9 @@ from sqlalchemy import select
 
 from conversation_engine.memory_manager import ConversationMemoryManager, utcnow
 from storage.postgres_models import CircuitBreakerState, UserRelationshipProfile
-from tests.integration.conftest import skip_if_no_docker
 
-# No Docker/testcontainers -> skip the whole module cleanly (never a collect error).
-skip_if_no_docker()
-
+# Docker-gating lives in tests/integration/conftest.py's pytest_collection_modifyitems
+# hook: with no Docker daemon, every integration-marked test is skipped at collection.
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope="session")]
 
 CHAT_ID = -100777

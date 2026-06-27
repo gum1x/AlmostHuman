@@ -1,11 +1,15 @@
 """Integration-test harness: real Postgres (pgvector) + Redis via testcontainers.
 
 These tests exercise the genuine SQL / pgvector / concurrency behaviour that the
-unit suite necessarily fakes. They need a Docker daemon, so each test module is
-gated (see ``skip_if_no_docker`` / the module-level ``pytest.skip`` in every
-integration test file): when testcontainers or Docker is unavailable, those
-modules skip cleanly instead of erroring. CI (GitHub Actions ubuntu-latest) has
-Docker, so the ``integration`` job runs them for real.
+unit suite necessarily fakes. They need a Docker daemon, so the whole suite is
+gated by the ``pytest_collection_modifyitems`` hook below: when testcontainers or
+Docker is unavailable, every ``integration``-marked test is marked skipped at
+collection time, so a plain ``pytest`` run on a machine without Docker stays green
+(collected-then-skipped, exit 0) rather than erroring in the container fixtures.
+CI (GitHub Actions ubuntu-latest) has Docker, so the ``integration`` job runs them
+for real. The hook deliberately avoids importing this conftest by dotted path
+(``tests`` is not an installed package, so ``from tests.integration.conftest
+import ...`` fails under the bare ``pytest`` console script CI uses).
 
 This conftest must import cleanly even when testcontainers is absent, so every
 testcontainers/SQLAlchemy-async import is done lazily inside the fixtures rather
@@ -74,22 +78,22 @@ def docker_is_available() -> bool:
         return False
 
 
-def skip_if_no_docker() -> None:
-    """Module-level guard for integration test files.
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Skip every ``integration``-marked test when Docker is unavailable.
 
-    Call at import time in each integration module::
-
-        from tests.integration.conftest import skip_if_no_docker
-        skip_if_no_docker()
-
-    Raises a module-level skip (handled cleanly by pytest in *test* modules) when
-    Docker/testcontainers is unavailable.
+    Runs as a conftest hook -- pytest auto-discovers it, so nothing has to import
+    this module by dotted path (which fails under the bare ``pytest`` console
+    script because ``tests`` is not an installed package). With no Docker daemon
+    (and no ``INTEGRATION_DATABASE_URL`` escape hatch) the container fixtures can't
+    start, so we mark the whole integration suite skipped here instead of letting
+    those fixtures error. The tests are still *collected*, so pytest exits 0, not 5.
     """
-    if not docker_is_available():
-        pytest.skip(
-            "Docker daemon / testcontainers unavailable; skipping integration tests",
-            allow_module_level=True,
-        )
+    if docker_is_available():
+        return
+    skip = pytest.mark.skip(reason="Docker daemon / testcontainers unavailable")
+    for item in items:
+        if item.get_closest_marker("integration") is not None:
+            item.add_marker(skip)
 
 
 def _run_migrations(database_url: str) -> None:
