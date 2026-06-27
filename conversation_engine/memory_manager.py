@@ -153,6 +153,12 @@ class ConversationMemoryManager:
             ]
 
         try:
+            # Chat-scoped scan + recency-decayed composite re-rank. This intentionally
+            # does NOT use an ivfflat ANN index (all three were dropped in migration
+            # 008): the score below (similarity * importance * recency-decay) is an
+            # ORDER BY expression ivfflat cannot serve, and pre-filtering by similarity
+            # alone would drop recent/important-but-less-similar memories. Per-chat
+            # counts are modest and ix_bot_vector_memories_chat_id scopes the WHERE.
             distance = BotVectorMemory.embedding.cosine_distance(
                 normalize_embedding(query_embedding)
             )
