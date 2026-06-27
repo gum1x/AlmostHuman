@@ -27,7 +27,12 @@ from conversation_engine.context_builder import (
     select_target_message,
 )
 from conversation_engine.engagement_gate import GateResult, compute_gate_score
-from conversation_engine.enrichment import Brief, build_brief, current_context_text, enrich_messages
+from conversation_engine.enrichment import (
+    Brief,
+    build_brief,
+    current_context_text,
+    enrich_messages_async,
+)
 from conversation_engine.feedback_loop import FeedbackLoop, run_meta_reflection
 from conversation_engine.memory_manager import ConversationMemoryManager
 from conversation_engine.output_planner import Action, OutputPlan, plan_output
@@ -303,10 +308,10 @@ class ConversationScheduler:
                 # humanizing delays are awaited OUTSIDE any open transaction.
                 return await self._finalize_cycle_behavioral(chat_id, prep, llm_out)
 
-            async with async_session_factory() as session:
-                async with session.begin():
-                    memory = ConversationMemoryManager(session)
-                    return await self._finalize_cycle(memory, prep, llm_out)
+            # Default path also manages its own (short) transactions so that the
+            # physical send happens OUTSIDE any open transaction and a post-send
+            # recording failure can never roll back a message that was delivered.
+            return await self._finalize_cycle(prep, llm_out)
         except Exception as exc:
             async with async_session_factory() as session:
                 async with session.begin():
@@ -356,17 +361,17 @@ class ConversationScheduler:
         await seed_persona_core(memory, self.config)
 
         messages = await memory.get_recent_messages(chat_id, limit=recent_message_limit)
-        enriched = enrich_messages(messages, self.config.prompt)
+        enriched = await enrich_messages_async(messages, self.config.prompt)
 
         high_level_limit = self.config.scheduler.high_level_message_limit
         high_level_messages = await memory.get_recent_messages(chat_id, limit=high_level_limit)
-        high_level_enriched = enrich_messages(high_level_messages, self.config.prompt)
+        high_level_enriched = await enrich_messages_async(high_level_messages, self.config.prompt)
         recent_context_limit = self.config.scheduler.recent_context_limit
         recent_for_summary = (
             high_level_messages[-recent_context_limit:] if high_level_messages else messages
         )
         recent_enriched_for_summary = (
-            enrich_messages(recent_for_summary, self.config.prompt)
+            await enrich_messages_async(recent_for_summary, self.config.prompt)
             if recent_for_summary
             else enriched
         )
@@ -828,77 +833,123 @@ class ConversationScheduler:
 
     async def _finalize_cycle(
         self,
-        memory: ConversationMemoryManager,
         prep: _CyclePrep,
         llm_out: _CycleLlmOutcome,
     ) -> int:
+        """Flag-OFF finalize. Manages its own short transactions so the physical
+        send happens OUTSIDE any open transaction (mirroring the behavioral path):
+        a post-send recording failure must not roll back a message that was already
+        delivered nor trip the circuit breaker for a successful send."""
         decision = llm_out.decision
-        stored_decision = await memory.insert_ai_decision(
-            chat_id=prep.chat_id,
-            prompt_version=self.config.ai.prompt_version,
-            snapshot_message_id=prep.snapshot_message_id,
-            new_message_count=prep.new_message_count,
-            should_respond=llm_out.ok,
-            confidence=decision.confidence,
-            response_text=decision.response_text,
-            reply_to_message_id=decision.reply_to_message_id,
-            reasoning=(
-                (decision.reasoning or "")
-                + (
-                    f" | posture update: {decision.updated_engagement_posture}"
-                    if decision.updated_engagement_posture
-                    else ""
-                )
-            )
-            if llm_out.ok
-            else _decline_reasoning(llm_out.reason, decision),
-            gate_score=prep.gate.gate_score,
-            gate_factors={**prep.gate.gate_factors, **prep.visible_numeric_controls},
-            request1_latency_ms=llm_out.request1.latency_ms,
-            request1_tokens_used=llm_out.request1.tokens_used,
-            request2_tokens_used=llm_out.request2.tokens_used,
-        )
+
+        # Decline: validate()/social-safety already said no. Record the AiDecision
+        # row and close the cycle out as a success — no send.
         if not llm_out.ok:
-            await memory.record_cycle_success(prep.chat_id)
+            async with async_session_factory() as session:
+                async with session.begin():
+                    memory = ConversationMemoryManager(session)
+                    await memory.insert_ai_decision(
+                        chat_id=prep.chat_id,
+                        prompt_version=self.config.ai.prompt_version,
+                        snapshot_message_id=prep.snapshot_message_id,
+                        new_message_count=prep.new_message_count,
+                        should_respond=False,
+                        confidence=decision.confidence,
+                        response_text=decision.response_text,
+                        reply_to_message_id=decision.reply_to_message_id,
+                        reasoning=_decline_reasoning(llm_out.reason, decision),
+                        gate_score=prep.gate.gate_score,
+                        gate_factors={**prep.gate.gate_factors, **prep.visible_numeric_controls},
+                        request1_latency_ms=llm_out.request1.latency_ms,
+                        request1_tokens_used=llm_out.request1.tokens_used,
+                        request2_tokens_used=llm_out.request2.tokens_used,
+                    )
+                    await memory.record_cycle_success(prep.chat_id)
             return self.config.scheduler.initial_interval_seconds
 
+        # Send the message FIRST, outside any transaction.
         sent_message_id = await self.sender.send_message(
             prep.chat_id,
             decision.response_text or "",
             decision.reply_to_message_id,
         )
-        await memory.update_ai_decision_sent_message(stored_decision.id, sent_message_id)
         persisted_posture = decision.updated_engagement_posture or llm_out.posture
-        bot_memory = await memory.insert_bot_memory(
-            chat_id=prep.chat_id,
-            sent_message_id=sent_message_id,
-            response_text=decision.response_text or "",
-            reply_to_user_id=decision.reply_to_user_id,
-            reply_to_message_id=decision.reply_to_message_id,
-            reasoning=decision.reasoning,
-            tone_calibration=decision.tone_calibration,
-            brief_snapshot=prep.brief.as_dict(),
-            stances=decision.stances,
-            prompt_version=self.config.ai.prompt_version,
-            cycle_snapshot_message_id=prep.snapshot_message_id,
-            current_posture=persisted_posture,
-        )
-        await write_interaction_memory(
-            memory,
-            prep.chat_id,
-            decision.reply_to_user_id,
-            decision.topic,
-            decision.response_text or "",
-        )
-        for topic, stance in decision.stances.items():
-            await memory.upsert_stance(
-                prep.chat_id, topic=topic, stance=str(stance), user_id=decision.reply_to_user_id
+        # The message is already out. A failure in the post-send recording below must
+        # NOT count as a cycle failure (that would trip the circuit breaker for a send
+        # that actually succeeded) — log it and move on instead of re-raising.
+        try:
+            async with async_session_factory() as session:
+                async with session.begin():
+                    memory = ConversationMemoryManager(session)
+                    stored_decision = await memory.insert_ai_decision(
+                        chat_id=prep.chat_id,
+                        prompt_version=self.config.ai.prompt_version,
+                        snapshot_message_id=prep.snapshot_message_id,
+                        new_message_count=prep.new_message_count,
+                        should_respond=True,
+                        confidence=decision.confidence,
+                        response_text=decision.response_text,
+                        reply_to_message_id=decision.reply_to_message_id,
+                        reasoning=(
+                            (decision.reasoning or "")
+                            + (
+                                f" | posture update: {decision.updated_engagement_posture}"
+                                if decision.updated_engagement_posture
+                                else ""
+                            )
+                        ),
+                        gate_score=prep.gate.gate_score,
+                        gate_factors={**prep.gate.gate_factors, **prep.visible_numeric_controls},
+                        request1_latency_ms=llm_out.request1.latency_ms,
+                        request1_tokens_used=llm_out.request1.tokens_used,
+                        request2_tokens_used=llm_out.request2.tokens_used,
+                    )
+                    await memory.update_ai_decision_sent_message(
+                        stored_decision.id, sent_message_id
+                    )
+                    bot_memory = await memory.insert_bot_memory(
+                        chat_id=prep.chat_id,
+                        sent_message_id=sent_message_id,
+                        response_text=decision.response_text or "",
+                        reply_to_user_id=decision.reply_to_user_id,
+                        reply_to_message_id=decision.reply_to_message_id,
+                        reasoning=decision.reasoning,
+                        tone_calibration=decision.tone_calibration,
+                        brief_snapshot=prep.brief.as_dict(),
+                        stances=decision.stances,
+                        prompt_version=self.config.ai.prompt_version,
+                        cycle_snapshot_message_id=prep.snapshot_message_id,
+                        current_posture=persisted_posture,
+                    )
+                    await write_interaction_memory(
+                        memory,
+                        prep.chat_id,
+                        decision.reply_to_user_id,
+                        decision.topic,
+                        decision.response_text or "",
+                    )
+                    for topic, stance in decision.stances.items():
+                        await memory.upsert_stance(
+                            prep.chat_id,
+                            topic=topic,
+                            stance=str(stance),
+                            user_id=decision.reply_to_user_id,
+                        )
+                        await write_stance_memory(
+                            memory, prep.chat_id, decision.reply_to_user_id, topic, str(stance)
+                        )
+                    await memory.record_cycle_success(prep.chat_id)
+            # Schedule the delayed feedback observation AFTER the recording txn commits,
+            # so it is never awaited inside an open transaction.
+            await self.feedback_loop.schedule_observation(
+                bot_memory.id, sent_message_id, prep.chat_id
             )
-            await write_stance_memory(
-                memory, prep.chat_id, decision.reply_to_user_id, topic, str(stance)
+        except Exception:
+            await log.aexception(
+                "post_send_record_failed",
+                chat_id=prep.chat_id,
+                sent_message_id=sent_message_id,
             )
-        await self.feedback_loop.schedule_observation(bot_memory.id, sent_message_id, prep.chat_id)
-        await memory.record_cycle_success(prep.chat_id)
         return self.config.scheduler.initial_interval_seconds
 
     # ------------------------------------------------------------------

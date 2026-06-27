@@ -109,6 +109,9 @@ class FeedbackLoop:
         self.sender = sender
         self._queue: asyncio.Queue[tuple[int, int, int]] = asyncio.Queue()
         self._shutdown = asyncio.Event()
+        # Strong refs to fire-and-forget observation tasks so they aren't GC'd
+        # mid-flight (asyncio only holds weak refs to running tasks).
+        self._bg_tasks: set[asyncio.Task] = set()
 
     async def schedule_observation(
         self, bot_memory_id: int, sent_message_id: int, chat_id: int, session=None
@@ -150,7 +153,11 @@ class FeedbackLoop:
                 )
             except asyncio.TimeoutError:
                 continue
-            asyncio.create_task(self.observe_response(bot_memory_id, sent_message_id, chat_id))
+            task = asyncio.create_task(
+                self.observe_response(bot_memory_id, sent_message_id, chat_id)
+            )
+            self._bg_tasks.add(task)
+            task.add_done_callback(self._bg_tasks.discard)
 
     def shutdown(self) -> None:
         self._shutdown.set()

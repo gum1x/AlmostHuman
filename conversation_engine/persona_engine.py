@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import random
 from datetime import timedelta
@@ -51,7 +52,7 @@ def load_embedder(model_name: str):
     return _embedder
 
 
-def embed_text(text: str) -> list[float]:
+def _embed_text_sync(text: str) -> list[float]:
     if _embedder is None:
         raise RuntimeError(
             "Embedder not loaded: call load_embedder() at startup "
@@ -61,6 +62,13 @@ def embed_text(text: str) -> list[float]:
     if hasattr(value, "tolist"):
         value = value.tolist()
     return [float(item) for item in value]
+
+
+async def embed_text(text: str) -> list[float]:
+    # SentenceTransformer.encode is CPU-bound and blocks the event loop; run it
+    # in a worker thread so chat cycles aren't stalled. Output is identical to
+    # the synchronous path (_embed_text_sync).
+    return await asyncio.to_thread(_embed_text_sync, text)
 
 
 def initial_identity_text(config: EngineConfig) -> str:
@@ -76,7 +84,7 @@ async def seed_persona_core(memory: ConversationMemoryManager, config: EngineCon
         identity_summary=config.persona.identity,
         core_beliefs=config.persona.core_beliefs,
         speaking_style=config.persona.speaking_style,
-        embedding=embed_text(text),
+        embedding=await embed_text(text),
     )
 
 
@@ -99,7 +107,7 @@ async def write_interaction_memory(
         memory_type="interaction",
         user_id=user_id,
         content=content,
-        embedding=embed_text(content),
+        embedding=await embed_text(content),
         importance_score=interaction_importance(positive_feedback, high_engagement),
     )
 
@@ -113,7 +121,7 @@ async def write_stance_memory(
         memory_type="stance",
         user_id=user_id,
         content=content,
-        embedding=embed_text(content),
+        embedding=await embed_text(content),
         importance_score=0.7,
     )
 
@@ -127,7 +135,7 @@ async def write_relationship_memory(
         memory_type="relationship",
         user_id=user_id,
         content=content,
-        embedding=embed_text(content),
+        embedding=await embed_text(content),
         importance_score=0.6,
     )
 
@@ -195,7 +203,7 @@ async def run_self_reflection(
         await log.awarning("self_reflection_skipped_model_error", error=str(exc)[:300])
         return  # Don't fail the whole cycle just because reflection couldn't run
 
-    reflection_embedding = embed_text(parsed.reflection_text)
+    reflection_embedding = await embed_text(parsed.reflection_text)
 
     await memory.insert_self_reflection(
         chat_id=chat_id,
@@ -209,7 +217,7 @@ async def run_self_reflection(
 
     for update in parsed.relationship_updates:
         await memory.upsert_user_relationship(
-            chat_id, update.user_id, update.notes, embed_text(update.notes)
+            chat_id, update.user_id, update.notes, await embed_text(update.notes)
         )
         await write_relationship_memory(memory, chat_id, update.user_id, update.notes)
 
@@ -240,7 +248,7 @@ async def get_relevant_persona_vectors(
     )
     memories = await memory.get_relevant_vector_memories(
         chat_id=chat_id,
-        query_embedding=embed_text(query_text),
+        query_embedding=await embed_text(query_text),
         top_k=top_k,
     )
     latest_reflection = await memory.get_latest_self_reflection(chat_id)

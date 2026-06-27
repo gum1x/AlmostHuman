@@ -114,6 +114,36 @@ class FakeMemory:
         return None
 
 
+class _FakeSession:
+    """No-op stand-in for the SQLAlchemy AsyncSession context managers opened
+    inside _finalize_cycle (`async with async_session_factory()` /
+    `async with session.begin()`)."""
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    def begin(self):
+        return self
+
+
+def patch_finalize_memory(monkeypatch, memory: FakeMemory) -> None:
+    """Route the sessions _finalize_cycle now opens internally to ``memory``.
+
+    _finalize_cycle manages its own short transactions (so the send happens
+    outside any open txn), so the fake memory is injected by stubbing the
+    session factory + ConversationMemoryManager rather than passed as an arg.
+    """
+    monkeypatch.setattr(
+        "conversation_engine.scheduler.async_session_factory", lambda: _FakeSession()
+    )
+    monkeypatch.setattr(
+        "conversation_engine.scheduler.ConversationMemoryManager", lambda session: memory
+    )
+
+
 def make_prep() -> _CyclePrep:
     gate = GateResult(
         gate_score=0.42,
@@ -154,16 +184,17 @@ def make_llm_out(decision: ResponseDecision, ok: bool, reason: str | None) -> _C
     )
 
 
-async def test_declined_cycle_persists_full_gate_factors_and_real_reasoning():
+async def test_declined_cycle_persists_full_gate_factors_and_real_reasoning(monkeypatch):
     scheduler = make_scheduler()
     memory = FakeMemory()
+    patch_finalize_memory(monkeypatch, memory)
     decision = ResponseDecision(
         should_respond=False,
         confidence=0.2,
         reasoning="this convo is between two people settling a deal, not my moment",
         annoying_reason="butting in would read as forced",
     )
-    await scheduler._finalize_cycle(memory, make_prep(), make_llm_out(decision, ok=False, reason="decision_should_not_respond"))
+    await scheduler._finalize_cycle(make_prep(), make_llm_out(decision, ok=False, reason="decision_should_not_respond"))
 
     assert len(memory.decisions) == 1
     row = memory.decisions[0]
@@ -179,9 +210,10 @@ async def test_declined_cycle_persists_full_gate_factors_and_real_reasoning():
     assert "butting in would read as forced" in row["reasoning"]
 
 
-async def test_sent_cycle_persists_full_gate_factors():
+async def test_sent_cycle_persists_full_gate_factors(monkeypatch):
     scheduler = make_scheduler()
     memory = FakeMemory()
+    patch_finalize_memory(monkeypatch, memory)
     decision = ResponseDecision(
         should_respond=True,
         confidence=0.9,
@@ -190,7 +222,7 @@ async def test_sent_cycle_persists_full_gate_factors():
         reply_to_user_id=2,
         reasoning="funny moment, jumping in",
     )
-    await scheduler._finalize_cycle(memory, make_prep(), make_llm_out(decision, ok=True, reason=None))
+    await scheduler._finalize_cycle(make_prep(), make_llm_out(decision, ok=True, reason=None))
 
     row = memory.decisions[0]
     for key in GATE_FACTOR_KEYS:

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import random
 import re
 import time
 from dataclasses import dataclass
@@ -10,6 +12,19 @@ import httpx
 from pydantic import BaseModel, Field
 
 from conversation_engine.config import EngineConfig
+
+# Bounded retry/backoff for transient LLM HTTP failures. Total attempts = 1
+# initial try + retries; backoff is exponential with jitter. Overridable via
+# AiConfig.max_retries; the rest are module constants (no config churn).
+_DEFAULT_MAX_RETRIES = 3
+_RETRY_BASE_DELAY_SECONDS = 0.5
+_RETRY_MAX_DELAY_SECONDS = 8.0
+
+
+def _is_retryable_status_error(exc: httpx.HTTPStatusError) -> bool:
+    """A bad HTTP status is transient only for 429 (rate limit) and 5xx."""
+    status = exc.response.status_code
+    return status == 429 or status >= 500
 
 
 class PerceptionDecision(BaseModel):
@@ -156,7 +171,7 @@ class GrokAiClient:
             return AiCallResult(text="", latency_ms=0, tokens_used=0)
 
         started = time.perf_counter()
-        response = await self._client.post(
+        response = await self._post_with_retry(
             "/chat/completions",
             headers={"x-grok-conv-id": f"{self.config.ai.prompt_version}:word"},
             json={
@@ -166,7 +181,6 @@ class GrokAiClient:
                 "temperature": temperature,
             },
         )
-        response.raise_for_status()
         payload = response.json()
         latency_ms = int((time.perf_counter() - started) * 1000)
         choices = payload.get("choices") or []
@@ -175,6 +189,39 @@ class GrokAiClient:
         usage = payload.get("usage") or {}
         tokens = int(usage.get("prompt_tokens") or 0) + int(usage.get("completion_tokens") or 0)
         return AiCallResult(text=content, latency_ms=latency_ms, tokens_used=tokens)
+
+    async def _post_with_retry(self, url: str, **kwargs: Any) -> httpx.Response:
+        """POST + raise_for_status with bounded retry on transient failures.
+
+        Retries only on httpx.TimeoutException, httpx.TransportError (incl.
+        ConnectError), and HTTP 429 / >=500. A single transient blip previously
+        propagated as a cycle failure and counted toward the circuit breaker;
+        this absorbs it. 4xx (except 429) and any JSON-parse issues at call
+        sites are NOT retried — they re-raise immediately. The final attempt's
+        exception is re-raised so callers still see a hard failure.
+        """
+        max_retries = max(1, int(getattr(self.config.ai, "max_retries", _DEFAULT_MAX_RETRIES)))
+        for attempt in range(max_retries):
+            try:
+                response = await self._client.post(url, **kwargs)
+                response.raise_for_status()
+                return response
+            except httpx.HTTPStatusError as exc:
+                if attempt >= max_retries - 1 or not _is_retryable_status_error(exc):
+                    raise
+            except (httpx.TimeoutException, httpx.TransportError):
+                # TimeoutException is a subclass of TransportError; this clause
+                # covers both timeouts and connection/transport drops.
+                if attempt >= max_retries - 1:
+                    raise
+            delay = min(
+                _RETRY_BASE_DELAY_SECONDS * (2**attempt),
+                _RETRY_MAX_DELAY_SECONDS,
+            )
+            delay += random.uniform(0, delay)  # full jitter on top of the backoff
+            await asyncio.sleep(delay)
+        # Unreachable: the loop either returns or re-raises on the final attempt.
+        raise RuntimeError("retry loop exited without returning")  # pragma: no cover
 
     async def _call(
         self, model: str, prompt: str, system: str | None, cache_key: str, temperature: float = 0.2
@@ -192,7 +239,7 @@ class GrokAiClient:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
 
-        response = await self._client.post(
+        response = await self._post_with_retry(
             "/chat/completions",
             headers={"x-grok-conv-id": f"{self.config.ai.prompt_version}:{cache_key}"},
             json={
@@ -202,7 +249,6 @@ class GrokAiClient:
                 "temperature": temperature,
             },
         )
-        response.raise_for_status()
         payload = response.json()
         latency_ms = int((time.perf_counter() - started) * 1000)
         choices = payload.get("choices") or []

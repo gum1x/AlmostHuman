@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -151,6 +152,18 @@ def enrich_messages(messages: list[Message], prompt_config: PromptConfig) -> lis
             )
         )
     return enriched
+
+
+async def enrich_messages_async(
+    messages: list[Message], prompt_config: PromptConfig
+) -> list[EnrichedMessage]:
+    """Async variant of enrich_messages for the chat loop.
+
+    VADER's polarity_scores() (invoked per message via sentiment_score) is
+    CPU-bound and blocks the event loop. Offload the whole batch to a worker
+    thread in one hop. Output is identical to the synchronous enrich_messages.
+    """
+    return await asyncio.to_thread(enrich_messages, messages, prompt_config)
 
 
 def build_brief(enriched_messages: list[EnrichedMessage]) -> Brief:

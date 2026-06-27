@@ -31,6 +31,10 @@ class AiConfig:
     min_confidence_to_send: float = 0.6
     prompt_version: str = "v1.1-grok-compact"
     persona_top_k: int = 4
+    # Bounded retry for transient LLM HTTP failures (timeout / connection drop /
+    # 429 / 5xx). Total attempts = 1 initial + (max_retries - 1) retries with
+    # exponential backoff + jitter. 4xx (except 429) and parse errors do not retry.
+    max_retries: int = 3
 
 
 @dataclass(frozen=True)

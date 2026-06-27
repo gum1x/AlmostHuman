@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -235,3 +236,44 @@ async def test_observe_response_window_anchored_to_send_time(monkeypatch):
     _, _, sent_at, window_minutes = fake.messages_after_args
     assert before <= sent_at <= after
     assert window_minutes == 0
+
+
+# --- background-task GC safety ---
+
+
+async def test_observation_task_tracked_then_discarded(monkeypatch):
+    # Regression: the fire-and-forget observe_response task was created without
+    # keeping a strong reference, so asyncio could GC it mid-flight. The loop must
+    # hold it in self._bg_tasks while pending and drop it once complete.
+    config = SimpleNamespace(feedback_loop=SimpleNamespace(observation_window_minutes=0))
+    loop = FeedbackLoop(config, ai_client=None, sender=None)
+
+    gate = asyncio.Event()
+    seen_args = []
+
+    async def fake_observe(bot_memory_id, sent_message_id, chat_id):
+        seen_args.append((bot_memory_id, sent_message_id, chat_id))
+        await gate.wait()
+
+    monkeypatch.setattr(loop, "observe_response", fake_observe)
+
+    await loop._queue.put((7, 1, -100))
+    drainer = asyncio.create_task(loop.run_observation_tasks())
+    try:
+        # Let the loop pull the item and spawn the observation task.
+        while not seen_args:
+            await asyncio.sleep(0)
+        assert seen_args == [(7, 1, -100)]
+        # Task is in flight (blocked on the gate) and held by a strong ref.
+        assert len(loop._bg_tasks) == 1
+        [obs_task] = loop._bg_tasks
+        assert not obs_task.done()
+
+        # Release the coroutine and let the done-callback fire.
+        gate.set()
+        await obs_task
+        await asyncio.sleep(0)
+        assert loop._bg_tasks == set()
+    finally:
+        loop.shutdown()
+        await drainer
