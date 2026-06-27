@@ -22,7 +22,7 @@ dependencies = [
     "httpx>=0.27",
     "pgvector>=0.3",
     "sentence-transformers>=3.0",
-    "vaderSentiment>=3.3",
+    "vaderSentiment>=3.3.2",
     "python-dotenv>=1.0",
 ]
 
