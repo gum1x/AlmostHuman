@@ -393,10 +393,10 @@ async def test_prepare_cycle_feeds_train_parity_features_to_classifier():
     scheduler.timing_classifier = classifier
     memory = FakeMemory(messages=FIXTURE)  # no bot memory: bot silent "for days"
 
-    result = await scheduler._prepare_cycle(memory, chat_id=-100, is_private_dm=False, previous_interval=30)
+    result = await scheduler._prepare_cycle(memory, chat_id=-100, is_private_dm=False)
 
-    # Classifier said skip -> cycle ends with a backoff interval + a recorded skip decision.
-    assert isinstance(result, int)
+    # Classifier said skip -> cycle ends with a recorded skip decision (prep returns None).
+    assert result is None
     assert len(classifier.calls) == 1
     call = classifier.calls[0]
     # Target is the last message (15: u2 replying to regular u1's msg 14).

@@ -296,10 +296,9 @@ class ConversationScheduler:
                         memory,
                         chat_id,
                         is_private_dm,
-                        previous_interval,
                     )
-                    if isinstance(prep_result, int):
-                        return prep_result
+                    if prep_result is None:
+                        return self._backoff_interval(previous_interval)
                     prep = prep_result
                     raw_context = prep.raw_context
 
@@ -338,8 +337,7 @@ class ConversationScheduler:
         memory: ConversationMemoryManager,
         chat_id: int,
         is_private_dm: bool,
-        previous_interval: int,
-    ) -> int | _CyclePrep:
+    ) -> _CyclePrep | None:
         new_message_threshold = (
             self.config.scheduler.dm_new_message_threshold
             if is_private_dm
@@ -357,7 +355,7 @@ class ConversationScheduler:
         )
         if new_message_count < new_message_threshold:
             if not active_bot_thread:
-                return self._backoff_interval(previous_interval)
+                return None
             new_message_count = max(1, new_message_count)
 
         await seed_persona_core(memory, self.config)
@@ -496,7 +494,7 @@ class ConversationScheduler:
                     message_id=getattr(target_for_direct, "message_id", None),
                 )
                 await memory.record_cycle_success(chat_id)
-                return self._backoff_interval(previous_interval)
+                return None
             elif not ts.passes:
                 await log.ainfo(
                     "timing_classifier_shadow",
@@ -564,7 +562,7 @@ class ConversationScheduler:
                     request2_tokens_used=0,
                 )
                 await memory.record_cycle_success(chat_id)
-                return self._backoff_interval(previous_interval)
+                return None
 
         persona_memories, latest_reflection = await get_relevant_persona_vectors(
             chat_id,

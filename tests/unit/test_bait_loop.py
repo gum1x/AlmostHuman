@@ -188,9 +188,9 @@ async def test_rate_cap_is_absolute_even_for_direct_replies():
         responses_10min=3,
         responses_60min=3,
     )
-    result = await scheduler._prepare_cycle(memory, chat_id=-100, is_private_dm=False, previous_interval=30)
+    result = await scheduler._prepare_cycle(memory, chat_id=-100, is_private_dm=False)
 
-    assert isinstance(result, int)  # blocked: no LLM call, no send
+    assert result is None  # blocked: no LLM call, no send
     assert len(memory.decisions) == 1
     row = memory.decisions[0]
     assert row["should_respond"] is False
@@ -208,9 +208,9 @@ async def test_consecutive_replies_to_same_user_stop_force_proceed():
         responses_10min=1,
         responses_60min=2,
     )
-    result = await scheduler._prepare_cycle(memory, chat_id=-100, is_private_dm=False, previous_interval=30)
+    result = await scheduler._prepare_cycle(memory, chat_id=-100, is_private_dm=False)
 
-    assert isinstance(result, int)
+    assert result is None
     row = memory.decisions[0]
     assert row["should_respond"] is False
     assert row["gate_factors"]["direct_override_suppressed"] == "consecutive_user_cap"
