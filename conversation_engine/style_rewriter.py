@@ -99,7 +99,7 @@ class LocalStyleRewriter:
     ) -> str:
         """Core hybrid path: local fine-tuned model phrases the actual reply text.
 
-        Smart model (Grok) provides the high-level control: the 'plan' (what we are actually doing,
+        The cloud model provides the high-level control: the 'plan' (what we are actually doing,
         intent, angle, meaning). The local model (LoRA trained on group history) renders it
         in authentic voice, brevity, and rhythm.
 

@@ -24,12 +24,12 @@ class PersonaConfig:
 
 @dataclass(frozen=True)
 class AiConfig:
-    perception_model: str = "grok-4.3"
-    decision_model: str = "grok-4.3"
+    perception_model: str = "moonshotai/kimi-k2-0905"
+    decision_model: str = "moonshotai/kimi-k2-0905"
     total_context_token_budget: int = 6_000
     max_output_tokens: int = 700
     min_confidence_to_send: float = 0.6
-    prompt_version: str = "v1.1-grok-compact"
+    prompt_version: str = "v1.2-more-willing-no-larp-bias"
     persona_top_k: int = 4
     # Bounded retry for transient LLM HTTP failures (timeout / connection drop /
     # 429 / 5xx). Total attempts = 1 initial + (max_retries - 1) retries with
@@ -113,7 +113,7 @@ class EngineConfig:
     local_style_chat_script: str = ""
     local_style_model_path: str = ""
     local_style_timeout_seconds: int = 120
-    use_local_model_for_responses: bool = False  # Legacy flag (no longer used). Hybrid is now the default: smart model (Grok) for decisions+plan, local for phrasing when LOCAL_STYLE_REWRITE_ENABLED + http mode configured.
+    use_local_model_for_responses: bool = False  # Legacy flag (no longer used). Hybrid is now the default: cloud model for decisions+plan, local for phrasing when LOCAL_STYLE_REWRITE_ENABLED + http mode configured.
     local_inference_mode: str = "subprocess"  # "subprocess" or "http" — http is required for VPS (container calls host inference server)
     local_inference_url: str = ""  # e.g. http://172.17.0.1:8765/generate . Required for http mode.
     # "standalone" = new advisor-format voice model: send raw context only, model writes the

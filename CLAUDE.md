@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-Autonomous Telegram group chat participant — an AI that acts as a real, low-ego member of chaotic crypto/degen Telegram groups. Hybrid architecture: cheap structured control plane (gate, posture, signals) + rich LLM character reasoning (Grok via OpenRouter/xAI) + optional local fine-tuned voice model for authentic phrasing.
+Autonomous Telegram group chat participant — an AI that acts as a real, low-ego member of chaotic crypto/degen Telegram groups. Hybrid architecture: cheap structured control plane (gate, posture, signals) + rich LLM character reasoning (Kimi K2 via OpenRouter; configurable, OpenAI-compatible) + optional local fine-tuned voice model for authentic phrasing.
 
 ## Commands
 
@@ -77,7 +77,7 @@ python -m alembic upgrade head
 - `config.toml` — all tunables: persona, AI models, gate weights, scheduler intervals, feedback timing
 - `.env` — secrets and infrastructure URLs (Telegram creds, API keys, DB/Redis URLs)
 - Gate weights in `[engagement_gate]` section are the primary tuning lever
-- `XAI_API_KEY` / `XAI_BASE_URL` — AI backend (xAI Grok, OpenRouter, or local)
+- `XAI_API_KEY` / `XAI_BASE_URL` — AI backend (OpenRouter, xAI, or local; any OpenAI-compatible endpoint)
 - `LOCAL_STYLE_REWRITE_ENABLED` — toggles hybrid voice mode (needs local model served via HTTP)
 
 ## Tech Stack

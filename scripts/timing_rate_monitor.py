@@ -32,11 +32,11 @@ def check_band(summary, lo, hi):
 async def _load_rows(hours):
     """Read recent AiDecision rows via the engine's memory manager. Imported lazily so
     the pure core (above) stays testable without a DB."""
-    from conversation_engine.config import load_engine_config
     from conversation_engine.memory_manager import ConversationMemoryManager
-    cfg = load_engine_config()
-    mm = ConversationMemoryManager(cfg)
-    return await mm.recent_timing_decisions(hours=hours)  # returns dicts as in summarize()
+    from storage.database import async_session_factory
+    async with async_session_factory() as session:
+        mm = ConversationMemoryManager(session)
+        return await mm.recent_timing_decisions(hours=hours)  # returns dicts as in summarize()
 
 
 def main(argv=None):
