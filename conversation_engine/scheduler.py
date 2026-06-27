@@ -362,21 +362,21 @@ class ConversationScheduler:
 
         await seed_persona_core(memory, self.config)
 
-        messages = await memory.get_recent_messages(chat_id, limit=recent_message_limit)
-        enriched = await enrich_messages_async(messages, self.config.prompt)
-
+        # One fetch + one VADER pass over the largest (high-level) window; the recent
+        # and summary windows are exact suffixes of it. enrich_messages is per-message
+        # (each EnrichedMessage depends only on its own Message + the constant topic
+        # list), so slicing the enriched list is identical to re-enriching the slice.
+        # This drops two redundant get_recent_messages queries and two VADER batches
+        # per cycle, and takes all three windows from a single consistent snapshot.
+        # fetch_limit guards the config invariant recent_message_limit <= high_level.
         high_level_limit = self.config.scheduler.high_level_message_limit
-        high_level_messages = await memory.get_recent_messages(chat_id, limit=high_level_limit)
-        high_level_enriched = await enrich_messages_async(high_level_messages, self.config.prompt)
         recent_context_limit = self.config.scheduler.recent_context_limit
-        recent_for_summary = (
-            high_level_messages[-recent_context_limit:] if high_level_messages else messages
-        )
-        recent_enriched_for_summary = (
-            await enrich_messages_async(recent_for_summary, self.config.prompt)
-            if recent_for_summary
-            else enriched
-        )
+        fetch_limit = max(high_level_limit, recent_message_limit)
+        high_level_messages = await memory.get_recent_messages(chat_id, limit=fetch_limit)
+        high_level_enriched = await enrich_messages_async(high_level_messages, self.config.prompt)
+
+        enriched = high_level_enriched[-recent_message_limit:]
+        recent_enriched_for_summary = high_level_enriched[-recent_context_limit:]
 
         recent_bot_mem = await memory.get_recent_bot_memory(chat_id, limit=6)
         recent_activity_lines = []
