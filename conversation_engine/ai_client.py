@@ -6,7 +6,7 @@ import random
 import re
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 import httpx
 from pydantic import BaseModel, Field
@@ -120,6 +120,35 @@ class AiCallResult:
     text: str
     latency_ms: int
     tokens_used: int
+
+
+@runtime_checkable
+class AiClient(Protocol):
+    """Structural interface for the LLM backend the engine talks to.
+
+    Both ``GrokAiClient`` (real, OpenAI-compatible / OpenRouter) and
+    ``FakeAiClient`` (offline stand-in) satisfy this. Call sites should treat the
+    client as an ``AiClient`` rather than a concrete class, so the fake is a true
+    drop-in and a new backend only has to match this surface. ``@runtime_checkable``
+    lets tests assert conformance with ``isinstance``.
+    """
+
+    async def call_perception_model(
+        self, prompt: str, system: str | None = None
+    ) -> AiCallResult: ...
+
+    async def call_decision_model(self, prompt: str, system: str | None = None) -> AiCallResult: ...
+
+    async def call_raw(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.8,
+        max_tokens: int | None = None,
+        model: str | None = None,
+    ) -> AiCallResult: ...
+
+    async def close(self) -> None: ...
 
 
 class GrokAiClient:
@@ -364,6 +393,22 @@ class FakeAiClient:
             latency_ms=0,
             tokens_used=0,
         )
+
+    async def call_raw(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.8,
+        max_tokens: int | None = None,
+        model: str | None = None,
+    ) -> AiCallResult:
+        # Offline stand-in for the word-generator's raw-chat path: emit nothing so
+        # callers degrade gracefully (no phrasing) instead of hitting a network.
+        return AiCallResult(text="", latency_ms=0, tokens_used=0)
+
+    async def close(self) -> None:
+        # No network client to release; present so FakeAiClient is a full drop-in.
+        return None
 
 
 def extract_json_object(text: str) -> str:

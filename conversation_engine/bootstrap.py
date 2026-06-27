@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from conversation_engine.ai_client import FakeAiClient, GrokAiClient
+from conversation_engine.ai_client import AiClient, FakeAiClient, GrokAiClient
 from conversation_engine.config import EngineConfig, load_engine_config
 from conversation_engine.memory_manager import ConversationMemoryManager
 from conversation_engine.persona_engine import load_embedder, run_self_reflection, seed_persona_core
@@ -66,7 +66,9 @@ async def bootstrap_chat(
             return backfilled
 
 
-async def run_bootstrap(config: EngineConfig, ai_client, bot_user_id: int | None = None) -> None:
+async def run_bootstrap(
+    config: EngineConfig, ai_client: AiClient, bot_user_id: int | None = None
+) -> None:
     load_embedder(config.persona_engine.embedding_model)
     for chat_id in config.active_chat_ids:
         backfilled = await bootstrap_chat(chat_id, config, ai_client, bot_user_id)
@@ -87,7 +89,7 @@ async def main() -> None:
 
     # Only use real client if we have a non-dummy key OR an explicit non-xAI base URL (local server)
     use_real_client = bool(config.xai_api_key) and not (is_dummy_key and is_xai_default)
-    ai_client = GrokAiClient(config) if use_real_client else FakeAiClient()
+    ai_client: AiClient = GrokAiClient(config) if use_real_client else FakeAiClient()
     sender = TelegramSender(config)
     bot_user_id = None
     try:
@@ -98,9 +100,7 @@ async def main() -> None:
     try:
         await run_bootstrap(config, ai_client, bot_user_id)
     finally:
-        close = getattr(ai_client, "close", None)
-        if close:
-            await close()
+        await ai_client.close()
 
 
 if __name__ == "__main__":

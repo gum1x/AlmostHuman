@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from conversation_engine import humanizer, suspicion_monitor, volume_governor
 from conversation_engine.ai_client import (
     AiCallResult,
+    AiClient,
     FakeAiClient,
     GrokAiClient,
     ResponseDecision,
@@ -95,7 +96,7 @@ class ConversationScheduler:
     def __init__(
         self,
         config: EngineConfig,
-        ai_client,
+        ai_client: AiClient,
         sender: TelegramSender,
         feedback_loop: FeedbackLoop,
         bot_user_id: int | None = None,
@@ -1471,9 +1472,7 @@ async def main() -> None:
             feedback_tasks.append(feedback_loop.run_due_observation_loop())
         await asyncio.gather(scheduler.run(), *feedback_tasks)
     finally:
-        close = getattr(ai_client, "close", None)
-        if close:
-            await close()
+        await ai_client.close()
         await sender.close()
         await dispose_engine()
 
