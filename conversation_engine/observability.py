@@ -55,3 +55,37 @@ def record_reflection_triggered(trigger: str) -> None:
 
 def record_vector_memory_retrieved(count: int) -> None:
     metrics.increment("conversation_engine.vector_memory.retrieved", amount=count)
+
+
+def _split_metric_key(key: str) -> tuple[str, str]:
+    """Split a stored metric key into ``(prometheus_name, label_block)``.
+
+    Stored keys look like ``name`` or ``name{a=1,b=2}``. Prometheus names may not
+    contain ``.``, so dots become underscores; the ``{...}`` label block (if any)
+    is passed through unchanged.
+    """
+    if key.endswith("}") and "{" in key:
+        name, _, labels = key.partition("{")
+        return name.replace(".", "_"), "{" + labels
+    return key.replace(".", "_"), ""
+
+
+def render_prometheus(m: Metrics | None = None) -> str:
+    """Render recorded metrics in Prometheus text exposition format.
+
+    Gauges and counters share the same numeric line shape; counters are emitted
+    with a ``# TYPE ... counter`` hint. Names are sanitized (``.`` -> ``_``) and
+    deterministically sorted so scrapes/tests are stable.
+    """
+    m = m if m is not None else metrics
+    lines: list[str] = []
+    seen_types: set[str] = set()
+    for store, mtype in ((m.gauges, "gauge"), (m.counters, "counter")):
+        for key in sorted(store):
+            name, labels = _split_metric_key(key)
+            if name not in seen_types:
+                # TYPE may be declared only once per metric family.
+                lines.append(f"# TYPE {name} {mtype}")
+                seen_types.add(name)
+            lines.append(f"{name}{labels} {store[key]}")
+    return "\n".join(lines) + ("\n" if lines else "")

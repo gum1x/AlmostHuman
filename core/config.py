@@ -19,11 +19,21 @@ class Settings(BaseSettings):
     redis_stream_maxlen: int = 100_000
     redis_autoclaim_interval_s: int = 30
     redis_autoclaim_min_idle_ms: int = 60_000
+    # After this many delivery attempts a failing entry is moved to the
+    # dead-letter stream and acked, so a poison event stops re-delivering forever.
+    redis_dlq_max_delivery: int = 5
 
     api_host: str = "0.0.0.0"
     api_port: int = 8000
+    # Bearer token required on every data endpoint that returns chat/PII content.
+    # Empty => fail closed: those endpoints reject (503) instead of serving PII.
+    api_auth_token: str = ""
     log_level: str = "INFO"
     log_json: bool = True
+
+    @property
+    def redis_dlq_stream_key(self) -> str:
+        return f"{self.redis_stream_key}:dlq"
 
     @property
     def chat_ids(self) -> list[int]:

@@ -1,11 +1,12 @@
 from contextlib import asynccontextmanager
 
 import redis.asyncio as redis
-from fastapi import Depends, FastAPI, Query
+from fastapi import Depends, FastAPI, Query, Security
+from fastapi.responses import PlainTextResponse
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.dependencies import get_message_repo, get_session
+from api.dependencies import get_message_repo, require_auth
+from conversation_engine.observability import render_prometheus
 from core.config import settings
 from core.logging import get_logger, setup_logging
 from core.schemas import HealthResponse, MessageResponse, PaginatedResponse
@@ -67,15 +68,28 @@ async def health():
     )
 
 
-@app.get("/messages/{chat_id}", response_model=PaginatedResponse)
+@app.get("/metrics", response_class=PlainTextResponse)
+async def metrics():
+    """Prometheus-format engine telemetry (counters/gauges from observability).
+
+    Left unauthenticated: it exposes only aggregate engine metrics, never chat
+    content or PII. The compose/Prometheus scraper can reach it without a token.
+    """
+    return render_prometheus()
+
+
+@app.get(
+    "/messages/{chat_id}",
+    response_model=PaginatedResponse,
+    dependencies=[Security(require_auth)],
+)
 async def get_messages(
     chat_id: int,
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     include_deleted: bool = Query(default=False),
-    session: AsyncSession = Depends(get_session),
+    repo: MessageRepository = Depends(get_message_repo),
 ):
-    repo = MessageRepository(session)
     messages, total = await repo.get_messages(
         chat_id=chat_id,
         limit=limit,
@@ -106,13 +120,16 @@ async def get_messages(
     return PaginatedResponse(items=items, total=total, limit=limit, offset=offset)
 
 
-@app.get("/messages/{chat_id}/thread/{message_id}", response_model=list[MessageResponse])
+@app.get(
+    "/messages/{chat_id}/thread/{message_id}",
+    response_model=list[MessageResponse],
+    dependencies=[Security(require_auth)],
+)
 async def get_thread(
     chat_id: int,
     message_id: int,
-    session: AsyncSession = Depends(get_session),
+    repo: MessageRepository = Depends(get_message_repo),
 ):
-    repo = MessageRepository(session)
     messages = await repo.get_thread(chat_id, message_id)
 
     return [

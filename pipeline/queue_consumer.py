@@ -1,6 +1,6 @@
 import asyncio
-import platform
 import os
+import platform
 
 import orjson
 import redis.asyncio as redis
@@ -23,6 +23,8 @@ class QueueConsumer:
         self._block_ms = settings.redis_block_ms
         self._autoclaim_interval = settings.redis_autoclaim_interval_s
         self._autoclaim_min_idle = settings.redis_autoclaim_min_idle_ms
+        self._dlq_stream_key = settings.redis_dlq_stream_key
+        self._dlq_max_delivery = settings.redis_dlq_max_delivery
         self._shutdown = asyncio.Event()
         self._worker: MessageWorker | None = None
 
@@ -109,8 +111,53 @@ class QueueConsumer:
                 event = RawTelegramEvent(**payload)
                 await self._worker.process(event)
                 await self._redis.xack(self._stream_key, self._group, entry_id)
-            except Exception:
+            except Exception as exc:
                 await log.aexception("event_processing_failed", entry_id=entry_id)
+                await self._maybe_dead_letter(entry_id, data, exc)
+
+    async def _maybe_dead_letter(self, entry_id, data: dict, exc: Exception):
+        """Dead-letter an entry once it has failed too many times.
+
+        The entry is still pending (we never acked it), so its authoritative
+        delivery count lives in Redis. When that count reaches the configured
+        cap we move the fields to the dead-letter stream and ack the original,
+        so a poison event stops re-delivering forever via the autoclaim loop.
+        Below the cap the entry is left pending for the next redelivery.
+        """
+        attempts = await self._delivery_count(entry_id)
+        if attempts < self._dlq_max_delivery:
+            return
+
+        dlq_fields = dict(data)
+        dlq_fields[b"original_id"] = (
+            entry_id if isinstance(entry_id, bytes) else str(entry_id).encode()
+        )
+        dlq_fields[b"attempts"] = str(attempts).encode()
+        dlq_fields[b"error"] = repr(exc).encode()
+
+        await self._redis.xadd(self._dlq_stream_key, dlq_fields)
+        await self._redis.xack(self._stream_key, self._group, entry_id)
+        await log.aerror(
+            "event_dead_lettered",
+            entry_id=entry_id,
+            attempts=attempts,
+            dlq_stream=self._dlq_stream_key,
+            error=repr(exc),
+        )
+
+    async def _delivery_count(self, entry_id) -> int:
+        """Return how many times Redis has delivered this pending entry."""
+        try:
+            pending = await self._redis.xpending_range(
+                self._stream_key, self._group,
+                min=entry_id, max=entry_id, count=1,
+            )
+        except Exception:
+            await log.aexception("delivery_count_lookup_failed", entry_id=entry_id)
+            return 0
+        if not pending:
+            return 0
+        return int(pending[0]["times_delivered"])
 
     async def _autoclaim_loop(self):
         while not self._shutdown.is_set():

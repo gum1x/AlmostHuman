@@ -6,7 +6,9 @@ services:
       POSTGRES_USER: ci_user
       POSTGRES_PASSWORD: ci_pass
     ports:
-      - "5432:5432"
+      # Bind to loopback only: reachable from the host for debugging, never the
+      # public interface. In-compose services connect over the internal network.
+      - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -23,7 +25,8 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      # Loopback only (see postgres). In-compose services use redis://redis:6379.
+      - "127.0.0.1:6379:6379"
     volumes:
       - redisdata:/data
     healthcheck:
@@ -91,10 +94,16 @@ services:
     build: .
     command: ["python", "-m", "uvicorn", "api.app:app", "--host", "0.0.0.0", "--port", "8000"]
     ports:
-      - "8000:8000"
+      # Loopback only: the API serves chat content / private-DM PII. Reach it via
+      # an SSH tunnel or reverse proxy, never the public interface. Auth is still
+      # enforced (API_AUTH_TOKEN) on every data endpoint.
+      - "127.0.0.1:8000:8000"
     environment:
       DATABASE_URL: postgresql+asyncpg://ci_user:ci_pass@postgres:5432/telegram_ci
       REDIS_URL: redis://redis:6379/0
+      # Bearer token required on data endpoints. Unset => those endpoints fail
+      # closed (503) instead of leaking PII. Set API_AUTH_TOKEN in .env.
+      API_AUTH_TOKEN: ${API_AUTH_TOKEN:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on:
       migrate:

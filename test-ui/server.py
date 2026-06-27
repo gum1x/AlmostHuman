@@ -302,7 +302,10 @@ if __name__ == "__main__":
 
     ip = _get_local_ip()
     port = 7777
+    # Loopback only: the test UI runs the engine over uploaded chat data (which can
+    # contain PII) and has no auth. Reach it from another device via an SSH tunnel
+    # (ssh -L 7777:localhost:7777 host), not by binding the public interface.
     print(f"\n  Test UI available at:")
     print(f"    Local:   http://localhost:{port}")
-    print(f"    Network: http://{ip}:{port}\n")
-    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
+    print(f"    Tunnel:  ssh -L {port}:localhost:{port} <this-host>  (was http://{ip}:{port})\n")
+    uvicorn.run(app, host="127.0.0.1", port=port, log_level="info")
